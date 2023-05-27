@@ -1,5 +1,8 @@
 import os
+import random
+
 import torch
+import numpy as np
 
 THOUSAND = 1000
 MILLION = 1000000
@@ -121,3 +124,12 @@ def int_list(argstr):
 
 def str_list(argstr):
     return list(argstr.split(','))
+
+#============================================================
+# for setting seeds
+#============================================================
+
+def seed_all(seed):
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)

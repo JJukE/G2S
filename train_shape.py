@@ -1,5 +1,6 @@
 import os
-import argparse
+import random
+
 import wandb
 import trimesh
 import torch
@@ -14,18 +15,17 @@ from tqdm.auto import tqdm
 from data.dpmpc_dataset import ShapeNetCore
 from models.diffusionae import DiffusionAE
 from models.dpmpc import get_linear_scheduler
-from utils.misc import *
 from utils.data import *
-from utils import util
+from utils.util import str_list, seed_all, CheckpointManager, print_model
 from options.train_options import TrainOptions
 from jjuke.logger import CustomLogger
 from jjuke.metrics import EMD_CD
-from jjuke.pointcloud.transform import *
+from jjuke.pointcloud.transform import RandomRotate
 
 os.environ["OMP_NUM_THREADS"] = str(min(16, mp.cpu_count()))
 
 #============================================================
-# Training, validation
+# Training and Validation
 #============================================================
 
 def train(iter):
@@ -103,7 +103,7 @@ def validate_inspect(iter):
     pc.show()
 
 #============================================================
-# Arguments and Settings
+# Additional Arguments
 #============================================================
 
 def get_local_parser(parser):
@@ -135,8 +135,8 @@ def get_local_parser(parser):
     parser.add_argument('--weight_decay', type=float, default=0)
     parser.add_argument('--max_grad_norm', type=float, default=10)
     parser.add_argument('--end_lr', type=float, default=1e-4)
-    parser.add_argument('--sched_start_epoch', type=int, default=150*THOUSAND)
-    parser.add_argument('--sched_end_epoch', type=int, default=300*THOUSAND)
+    parser.add_argument('--sched_start_epoch', type=int, default=150000)
+    parser.add_argument('--sched_end_epoch', type=int, default=300000)
 
     # Training
     parser.add_argument('--num_val_batches', type=int, default=-1)
@@ -146,7 +146,7 @@ def get_local_parser(parser):
     return parser
 
 #============================================================
-# main
+# Main
 #============================================================
 
 if __name__ == '__main__':
@@ -164,21 +164,25 @@ if __name__ == '__main__':
         args.exps_dir = '/root/hdd1/G2S/practice'
         args.train_batch_size = 128
         args.use_wandb = True
-        args.val_freq = 100
 
     # get logger and checkpoint manager
-    log_dir = os.path.join(args.exps_dir, args.name)
-    logger = CustomLogger(log_dir, isTrain=True)
-    ckpt_mgr = CheckpointManager(log_dir, logger=logger)
+    exp_dir = os.path.join(args.exps_dir, args.name)
+    logger = CustomLogger(exp_dir, isTrain=options.isTrain)
+    ckpt_mgr = CheckpointManager(exp_dir, logger=logger)
     logger.info(options.print_device())
     logger.info(options.print_args())
+    
+    # set seed
+    if not args.use_seed:
+        args.seed = random.randint(1, 10000)
+    seed_all(args.seed)
 
     # set wandb
     if args.use_wandb:
         run = wandb.init(
             entity=args.wandb_entity,
             project=args.wandb_project_name,
-            name=args.name
+            name=args.name + "_train"
         )
 
     # Datasets and loaders
@@ -189,16 +193,16 @@ if __name__ == '__main__':
     logger.info('Loading datasets...')
 
     # dataloaders
-    data_path = os.path.join(args.data_dir, 'shapenet.hdf5')
+    dataset_path = os.path.join(args.data_dir, 'shapenet.hdf5')
     train_dataset = ShapeNetCore(
-        path=data_path,
+        path=dataset_path,
         cates=args.categories,
         split='train',
         scale_mode=args.scale_mode,
         transform=transform,
     )
     val_dataset = ShapeNetCore(
-        path=data_path,
+        path=dataset_path,
         cates=args.categories,
         split='val',
         scale_mode=args.scale_mode,
@@ -228,7 +232,7 @@ if __name__ == '__main__':
     else:
         model = DiffusionAE(args).to(args.device)
 
-    logger.info(util.print_model(model))
+    logger.info(print_model(model))
 
 
     # Optimizer and scheduler

@@ -33,6 +33,10 @@ class BaseOptions():
         
         # debugging mode
         parser.add_argument('--debug', type=bool, default=True, help='debugging mode or not')
+        
+        # setting seed
+        parser.add_argument('--use_seed', type=bool, default=False, help='if True, use specified seed, else, use random seed')
+        parser.add_argument('--seed', type=int, default=2023)
 
         self.parser = parser
         self.device = None
