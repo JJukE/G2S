@@ -6,7 +6,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 import h5py
-from tqdm.auto import tqdm
+from tqdm import tqdm
 
 
 synsetid_to_cate = {
