@@ -50,7 +50,7 @@ class DiffusionAETestOptions(TestOptions):
     def initialize(self, parser):
         parser = TestOptions.initialize(self, parser)
         
-        parser.add_argument('--categories', type=str_list, default=['all'])
+        parser.add_argument('--categories', type=str2list, default=['all'])
         parser.add_argument('--scale_mode', type=str, default='shape_unit')
         parser.add_argument('--num_vis', type=int, default=50, help='Number of objects to visualize') 
         

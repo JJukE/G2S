@@ -162,23 +162,24 @@ class TestOptions(BaseOptions):
     It also includes shared options defined in BaseOptions.
     """
 
-    def __init__(self):
-        super().__init__()
+    def initialize(self, parser):
+        parser = BaseOptions.initialize(self, parser)
         
         # result parameters
-        self.parser.add_argument('--visualize', type=bool, default=False, help='whether visualize in evaluation')
+        parser.add_argument('--visualize', type=str2bool, default=False, help='whether visualize in evaluation')
         
         # evaluation parameters
-        self.parser.add_argument('--ckpt_name', type=str, default='ckpt.pt', help='checkpoint path to start evaluation')
-        self.parser.add_argument('--phase', type=str, default='test', help='train, val, test, etc')
-        self.parser.add_argument('--test_batch_size', type=int, default=128)
+        parser.add_argument('--ckpt_name', type=str, default='ckpt.pt', help='checkpoint file name to start evaluation')
+        parser.add_argument('--phase', type=str, default='test', help='train, val, test, etc')
+        parser.add_argument('--test_batch_size', type=int, default=128)
 
         # wandb parameters
-        self.parser.add_argument('--use_wandb', type=bool, default=False, help='if specified, then init wandb logging')
-        self.parser.add_argument('--wandb_entity', type=str, default='ray_park', help='user name of wandb')
-        self.parser.add_argument('--wandb_project_name', type=str, default='G2S', help='specify wandb project name')
+        parser.add_argument('--use_wandb', type=str2bool, default=False, help='if specified, then init wandb logging')
+        parser.add_argument('--wandb_entity', type=str, default='ray_park', help='user name of wandb')
+        parser.add_argument('--wandb_project_name', type=str, default='G2S', help='specify wandb project name')
 
         self.isTrain = False
+        return parser
 
 #============================================================
 # for type setting

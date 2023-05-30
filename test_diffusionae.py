@@ -67,8 +67,8 @@ def eval(model, test_loader, args, ckpt_args, res_dir):
     metrics = EMD_CD(all_recons.to(args.device), all_ref.to(args.device), batch_size=args.test_batch_size)
     cd, emd = metrics['MMD-CD'].item(), metrics['MMD-EMD'].item()
     
-    if args.visualize: # test (will be deleted)
-        visualizer.visualize(all_ref[:args.num_vis], num_in_row=8)
+    # if args.visualize: # visualize on the window
+    #     visualizer.visualize(all_ref[:args.num_vis], num_in_row=8)
     logger.info('[Eval] CD {:.12f} | EMD {:.12f}'.format(cd, emd))
 
 #============================================================
@@ -104,9 +104,12 @@ if __name__ == '__main__':
         args.exps_dir = '/root/hdd1/G2S/practice'
         args.ckpt_name = 'ckpt_100000.pt'
         args.test_batch_size = 128
+        args.use_randomseed = False
         args.visualize = True
 
     # get logger, heckpoint manager and visualizer
+    exp_dir = os.path.join(args.exps_dir, args.name, "ckpts")
+    ckpt_path = os.path.join(exp_dir, args.ckpt_name)
     res_dir = os.path.join(args.exps_dir, args.name, "results")
     
     logger = CustomLogger(res_dir, isTrain=args.isTrain)
@@ -117,7 +120,7 @@ if __name__ == '__main__':
     
     
     # set seed
-    if not args.use_seed:
+    if not args.use_randomseed:
         args.seed = random.randint(1, 10000)
     seed_all(args.seed)
 
@@ -137,14 +140,14 @@ if __name__ == '__main__':
 
     # Model
     logger.info('Loading model...')
-    ckpt = torch.load(args.ckpt_path, map_location=args.device)
+    ckpt = torch.load(ckpt_path, map_location=args.device)
     model = DiffusionAE(ckpt['args']).to(args.device)
     model.load_state_dict(ckpt['state_dict'])
 
     # Main loop
     logger.info('Start evaluation...')
     try:
-        eval(model, test_loader, args, ckpt_args=ckpt['args'])
+        eval(model, test_loader, args, ckpt_args=ckpt['args'], res_dir=res_dir)
 
     except KeyboardInterrupt:
         logger.info('Terminating...')
