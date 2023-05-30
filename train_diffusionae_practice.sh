@@ -1,0 +1,12 @@
+python train_diffusionae.py \
+--debug False \
+--data_dir "/root/hdd1/DPMPC" \
+--name "G2S_DPMPC_practice_230529" \
+--gpu_ids "0" \
+--exps_dir "/root/hdd1/G2S/practice" \
+--train_batch_size 128 \
+--latent_dim 128 \
+--use_wandb True --visualize False \
+--use_randomseed True \
+--val_freq 5000 \
+--max_iters 200000

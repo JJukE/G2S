@@ -13,31 +13,28 @@ class SceneGraphVAE(nn.Module):
     It has an embedding of bounding box latents.
     """
     def __init__(self, vocab, embedding_dim=128, batch_size=32,
-                 train_3d=True,
                  decoder_cat=False,
                  input_dim=6,
                  gconv_pooling='avg', gconv_num_layers=5,
                  mlp_normalization='none',
                  vec_noise_dim=0,
-                 replace_latent=False,
                  residual=False,
-                 use_angles=False,
+                 use_angles=True,
                  autoencoder=None):
         super().__init__()
 
         gconv_dim = embedding_dim
         gconv_hidden_dim = gconv_dim * 4
         box_embedding_dim = int(embedding_dim)
+        
         if use_angles:
             angle_embedding_dim = int(embedding_dim / 4)
             box_embedding_dim = int(embedding_dim * 3 / 4)
             Nangle = 24
         obj_embedding_dim = embedding_dim
 
-        self.replace_all_latent = replace_latent
         self.batch_size = batch_size
         self.embedding_dim = embedding_dim
-        self.train_3d = train_3d
         self.decoder_cat = decoder_cat
         self.vocab = vocab
         self.vec_noise_dim = vec_noise_dim
@@ -326,10 +323,10 @@ class VAE(nn.Module):
 
         if self.type_ == 'dis':
             assert replace_latent is not None
-            self.vae_box = SGVAE(vocab, embedding_dim=64, decoder_cat=True, mlp_normalization="batch",
+            self.vae_box = SceneGraphVAE(vocab, embedding_dim=64, decoder_cat=True, mlp_normalization="batch",
                                input_dim=num_box_params, replace_latent=replace_latent, use_angles=with_angles,
                                residual=residual, gconv_pooling=gconv_pooling, gconv_num_layers=5)
-            self.vae_shape = SGVAE(vocab, embedding_dim=128, decoder_cat=True, mlp_normalization="batch",
+            self.vae_shape = SceneGraphVAE(vocab, embedding_dim=128, decoder_cat=True, mlp_normalization="batch",
                                  input_dim=128, gconv_num_layers=5
                                  , replace_latent=replace_latent,
                                  residual=residual, gconv_pooling=gconv_pooling, use_angles=False)

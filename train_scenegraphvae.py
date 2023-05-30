@@ -1,8 +1,10 @@
 import os
 import random
+import time
 
 import wandb
 import trimesh
+import numpy as np
 import torch
 import torch.multiprocessing as mp
 import torch.distributed as dist
@@ -10,23 +12,49 @@ from torch.utils.data import DataLoader, random_split
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
 from torch.nn.utils import clip_grad_norm_
-from tqdm.auto import tqdm
+from tqdm import tqdm
 
-from data.dpmpc_dataset import ShapeNetCore
-from models.diffusionae import DiffusionAE
+from data.sg_dataset import SGDataset
+from models.scenegraphvae import SceneGraphVAE
 from models.dpmpc import get_linear_scheduler
-from utils.data import *
-from utils.util import str_list, seed_all, CheckpointManager, print_model
-from options.train_options import TrainOptions
+from utils.util import seed_all, CheckpointManager, print_model
+from options.diffusionae_options import DiffusionAETrainOptions
 from jjuke.logger import CustomLogger
 from jjuke.metrics import EMD_CD
 from jjuke.pointcloud.transform import RandomRotate
+
+from utils.visualizer import ObjectVisualizer
 
 os.environ["OMP_NUM_THREADS"] = str(min(16, mp.cpu_count()))
 
 #============================================================
 # Training and Validation
 #============================================================
+
+def train_one_epoch():
+    for i, data in enumerate(train_loader):
+        # skip invalid data
+        if data == -1:
+            continue
+        
+        try:
+            enc_objs, enc_triples, enc_tight_boxes, enc_objs_to_scene, enc_triples_to_scene = data['encoder']['objs'],\
+                        data['encoder']['triplets'], data['encoder']['boxes'], data['encoder']['obj_to_scene'], data['encoder']['tiple_to_scene']
+
+            enc_points = data['encoder']['points']
+            enc_points = enc_points.cuda()
+
+            dec_objs, dec_triples, dec_tight_boxes, dec_objs_to_scene, dec_triples_to_scene = data['decoder']['objs'],\
+                        data['decoder']['triplets'], data['decoder']['boxes'], data['decoder']['obj_to_scene'], data['decoder']['tiple_to_scene']
+
+            if 'points' in data['decoder']:
+                dec_points = data['decoder']['points']
+                dec_points = dec_points.cuda()
+
+        except Exception as e:
+            print('Exception', str(e))
+            continue
+        
 
 def train(iter):
     # Load data
@@ -80,8 +108,9 @@ def validate_loss(iter):
 
     return cd
 
-# TODO: ./utils/visualizer.py에 PCVisualizer class 추가 (pcu 활용 등)
+
 def validate_inspect(iter):
+    visualizer = ObjectVisualizer()
     sum_n = 0
     sum_chamfer = 0
     for i, batch in enumerate(tqdm(val_loader, desc='Inspect')):
@@ -98,52 +127,7 @@ def validate_inspect(iter):
     
     arr_pc = recons.cpu().detach().numpy().reshape(-1,3) # only visualize the first batch(first category)
 
-    pc = trimesh.PointCloud(arr_pc)
-    pc.export(file_obj=os.path.join(args.exps_dir, "training_iter_{}.ply".format(it)))
-    pc.show()
-
-#============================================================
-# Additional Arguments
-#============================================================
-
-def get_local_parser(parser):
-    """Get additional arguments for training
-    Args:
-        parser (TrainOptions.parser)
-    Returns:
-        parser : New parser with additional arguments
-    """
-    # Additional arguments
-    # Model arguments
-    parser.add_argument('--latent_dim', type=int, default=256)
-    parser.add_argument('--num_steps', type=int, default=200)
-    parser.add_argument('--num_points', type=int, default=2048)
-    parser.add_argument('--beta_1', type=float, default=1e-4)
-    parser.add_argument('--beta_T', type=float, default=0.05)
-    parser.add_argument('--sched_mode', type=str, default='linear')
-    parser.add_argument('--flexibility', type=float, default=0.0)
-    parser.add_argument('--residual', type=eval, default=True, choices=[True, False])
-    parser.add_argument('--resume', type=str, default=None)
-
-    # Datasets and loaders
-    parser.add_argument('--categories', type=str_list, default=['all'])
-    parser.add_argument('--scale_mode', type=str, default='shape_unit')
-    parser.add_argument('--rotate', type=eval, default=False, choices=[True, False])
-
-    # Optimizer and scheduler
-    parser.add_argument('--lr', type=float, default=1e-3)
-    parser.add_argument('--weight_decay', type=float, default=0)
-    parser.add_argument('--max_grad_norm', type=float, default=10)
-    parser.add_argument('--end_lr', type=float, default=1e-4)
-    parser.add_argument('--sched_start_epoch', type=int, default=150000)
-    parser.add_argument('--sched_end_epoch', type=int, default=300000)
-
-    # Training
-    parser.add_argument('--num_val_batches', type=int, default=-1)
-    parser.add_argument('--num_inspect_batches', type=int, default=1)
-    parser.add_argument('--num_inspect_pointclouds', type=int, default=4)
-
-    return parser
+    visualizer.visualize(arr_pc)
 
 #============================================================
 # Main
@@ -151,30 +135,35 @@ def get_local_parser(parser):
 
 if __name__ == '__main__':
     # Arguments for training
-    options = TrainOptions()
-    parser = options.parser
-    parser = get_local_parser(parser)
-    options.parser = parser
-    args = options.parse()
+    args, arg_msg, device_msg = DiffusionAETrainOptions().parse()
 
     if args.debug:
-        args.data_dir = '/root/hdd1/DPMPC'
-        args.name = 'G2S_DPMPC_practice_230527'
+        args.data_dir = '/root/hdd1/G3D/GT'
+        # args.data_dir_3RScan = '/root/hdd1/G3D/3RScan'
+        args.name = 'G2S_SGVAE_practice_230529'
         args.gpu_ids = '0'
         args.exps_dir = '/root/hdd1/G2S/practice'
-        args.train_batch_size = 128
+        args.train_batch_size = 48
+        args.num_treads = 8
+        args.lr = 0.0001
+        args.num_epochs = 200
+        
+        args.path2ae = '/root/hdd1/G2S/practice/G2S_DPMPC_practice_230529/ckpts/ckpt_100000.pt'
+        
         args.use_wandb = True
+        args.visualize = False
 
     # get logger and checkpoint manager
-    exp_dir = os.path.join(args.exps_dir, args.name)
-    logger = CustomLogger(exp_dir, isTrain=options.isTrain)
-    ckpt_mgr = CheckpointManager(exp_dir, logger=logger)
-    logger.info(options.print_device())
-    logger.info(options.print_args())
+    exp_dir = os.path.join(args.exps_dir, args.name, "ckpts")
+    logger = CustomLogger(exp_dir, isTrain=args.isTrain)
+    ckpt_mgr = CheckpointManager(exp_dir, isTrain=args.isTrain, logger=logger)
+    logger.info(arg_msg)
+    logger.info(device_msg)
     
     # set seed
-    if not args.use_seed:
+    if args.use_randomseed:
         args.seed = random.randint(1, 10000)
+    logger.info("Seed: {}".format(args.seed))
     seed_all(args.seed)
 
     # set wandb
@@ -184,76 +173,57 @@ if __name__ == '__main__':
             project=args.wandb_project_name,
             name=args.name + "_train"
         )
+    
+    # prepare pre-trained autoencoder used to shape generation
+    logger.info("Loading pre-trained autoencoder... ")
+    ckpt = torch.load(args.path2ae, map_location=args.device)
+    model = DiffusionAE(ckpt['args']).to(args.device)
+    model.load_state_dict(ckpt['state_dict'])
 
-    # Datasets and loaders
-    transform = None
-    if args.rotate:
-        transform = RandomRotate(180, ['pointcloud'], axis=1)
-    logger.info('Transform: %s' % repr(transform))
-    logger.info('Loading datasets...')
-
-    # dataloaders
-    dataset_path = os.path.join(args.data_dir, 'shapenet.hdf5')
-    train_dataset = ShapeNetCore(
-        path=dataset_path,
-        cates=args.categories,
-        split='train',
-        scale_mode=args.scale_mode,
-        transform=transform,
+    # Datasets and loaders : TODO
+    logger.info("Loading datasets...")
+    train_dataset = SGDataset(
+        path=args.data_dir
+        # TODO
     )
-    val_dataset = ShapeNetCore(
-        path=dataset_path,
-        cates=args.categories,
-        split='val',
-        scale_mode=args.scale_mode,
-        transform=transform,
+    val_dataset = SGDataset(
+        path=args.data_dir,
+        # TODO
     )
 
     train_loader = DataLoader(dataset=train_dataset,
                             batch_size=args.train_batch_size,
-                            shuffle=False,
-                            drop_last=True,
-                            pin_memory=True)
+                            shuffle=True)
     val_loader = DataLoader(dataset=val_dataset,
                             batch_size=args.val_batch_size,
-                            shuffle=False,
-                            drop_last=True,
-                            pin_memory=True)
-
-    train_iter = get_data_iterator(train_loader) # for inf iteration
+                            shuffle=False)
 
     # Model
     logger.info('Building model...')
     if args.continue_train:
-        logger.info('Continue training from checkpoint...')
+        logger.info("Continue training from checkpoint...")
         ckpt = torch.load(args.ckpt_path)
-        model = DiffusionAE(ckpt['args']).to(args.device)
+        model = SceneGraphVAE(ckpt['args']).to(args.device)
         model.load_state_dict(ckpt['state_dict'])
     else:
-        model = DiffusionAE(args).to(args.device)
+        model = SceneGraphVAE(args).to(args.device)
 
+    if args.use_wandb:
+        wandb.watch(model, log="all")
     logger.info(print_model(model))
 
 
     # Optimizer and scheduler
-    optimizer = torch.optim.Adam(model.parameters(),
-        lr=args.lr,
-        weight_decay=args.weight_decay
-    )
-    scheduler = get_linear_scheduler(
-        optimizer,
-        start_epoch=args.sched_start_epoch,
-        end_epoch=args.sched_end_epoch,
-        start_lr=args.lr,
-        end_lr=args.end_lr
-    )
+    params = filter(lambda x: x.requires_grad, list(model.parameters()))
+    optimizer = torch.optim.Adam(params, lr=args.lr)
 
     # Main loop
-    logger.info('Start training...')
+    logger.info("Start training...")
     try:
-        # wandb setting
-        if args.use_wandb:
-            wandb.watch(model, model.diffusion.get_loss, log="all")
+        for epoch in range(args.num_epochs):
+            epoch_start_time = time.time()
+            train_one_epoch()
+            logger.info("End of epoch {}/{} \t Time taken: {} sec".format(epoch, args.num_epochs, time.time() - epoch_start_time))
 
         it = 1
         while it <= args.max_iters:
@@ -267,10 +237,10 @@ if __name__ == '__main__':
                     
                     if args.visualize:
                         validate_inspect(it)
+                        logger.info("Continue training...")
 
                 opt_states = {
-                    'optimizer': optimizer.state_dict(),
-                    'scheduler': scheduler.state_dict(),
+                    'optimizer': optimizer.state_dict()
                 }
                 # save model
                 save_fname = "ckpt_{}.pt".format(int(it))
@@ -282,6 +252,7 @@ if __name__ == '__main__':
             wandb.finish()
 
     except KeyboardInterrupt:
-        logger.info('Terminating...')
+        logger.info("Terminating...")
         logger.flush()
-        wandb.finish()
+        if args.use_wandb:
+            wandb.finish()

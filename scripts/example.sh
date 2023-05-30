@@ -1,1 +1,0 @@
-# you can modify this shell file to train or test
