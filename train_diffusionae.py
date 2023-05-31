@@ -117,6 +117,8 @@ if __name__ == '__main__':
         args.exps_dir = '/root/hdd1/G2S/practice'
         args.train_batch_size = 128
         args.use_wandb = True
+        args.wandb_entity = 'ray_park'
+        args.wandb_project_name = 'G2S'
         args.visualize = False
 
     # get logger and checkpoint manager
@@ -189,7 +191,7 @@ if __name__ == '__main__':
         
     if args.use_wandb:
         wandb.watch(model, log="all")
-    logger.info(print_model(model))
+    logger.info(print_model(model, verbose=args.verbose))
 
 
     # Optimizer and scheduler

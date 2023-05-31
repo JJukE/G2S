@@ -3,9 +3,10 @@ import random
 import time
 
 import wandb
-import trimesh
 import numpy as np
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 import torch.multiprocessing as mp
 import torch.distributed as dist
 from torch.utils.data import DataLoader, random_split
@@ -14,16 +15,16 @@ from torch.utils.data.distributed import DistributedSampler
 from torch.nn.utils import clip_grad_norm_
 from tqdm import tqdm
 
-from data.sg_dataset import SGDataset
-from models.scenegraphvae import SceneGraphVAE
+from data.sg_dataset import SceneGraphDataset, collate_fn_sgvae
+from models.scenegraphvae import LayoutVAE
 from models.dpmpc import get_linear_scheduler
 from utils.util import seed_all, CheckpointManager, print_model
-from options.diffusionae_options import DiffusionAETrainOptions
+from options.scenegraphvae_options import SGVAETrainOptions
 from jjuke.logger import CustomLogger
 from jjuke.metrics import EMD_CD
 from jjuke.pointcloud.transform import RandomRotate
 
-from utils.visualizer import ObjectVisualizer
+from utils.visualizer import SceneVisualizer
 
 os.environ["OMP_NUM_THREADS"] = str(min(16, mp.cpu_count()))
 
@@ -31,103 +32,162 @@ os.environ["OMP_NUM_THREADS"] = str(min(16, mp.cpu_count()))
 # Training and Validation
 #============================================================
 
-def train_one_epoch():
-    for i, data in enumerate(train_loader):
+def train_one_epoch(args, model, train_loader, optimizer, epoch):
+    model.train()
+    train_losses = {'recon_loss': [], 'angle_loss': [], 'KL_Gauss_loss': [], 'total_loss': []}
+    for i, data in enumerate(tqdm(train_loader, desc='Train')):
         # skip invalid data
         if data == -1:
             continue
         
         try:
-            enc_objs, enc_triples, enc_tight_boxes, enc_objs_to_scene, enc_triples_to_scene = data['encoder']['objs'],\
-                        data['encoder']['triplets'], data['encoder']['boxes'], data['encoder']['obj_to_scene'], data['encoder']['tiple_to_scene']
+            objs = data['objs'].to(args.device)
+            triples = data['triples'].to(args.device)
+            tight_boxes = data['boxes'].to(args.device)
 
-            enc_points = data['encoder']['points']
-            enc_points = enc_points.cuda()
+        except Exception as e:
+            print('Exception', str(e))
+            continue
 
-            dec_objs, dec_triples, dec_tight_boxes, dec_objs_to_scene, dec_triples_to_scene = data['decoder']['objs'],\
-                        data['decoder']['triplets'], data['decoder']['boxes'], data['decoder']['obj_to_scene'], data['decoder']['tiple_to_scene']
+        # TODO: avoid batches with insufficient number of instances with valid shape classes
+        # mask = [ob in dataset.point_classes_idx for ob in dec_objs] # indices after eliminating underrepresented classes
+        # if sum(mask) <= 1:
+        #     continue
+        
+        optimizer.zero_grad()
+        
+        # separate boxes and angles from tight_boxes
+        # limit the angle bin range from 0 to 24
+        boxes = tight_boxes[:, :6]
+        angles = tight_boxes[:, 6].long() - 1 
+        angles = torch.where(angles > 0, angles, torch.zeros_like(angles))
+        angles = torch.where(angles < 24, angles, torch.zeros_like(angles))
+        
+        boxes = boxes.to(args.device)
+        angles = angles.to(args.device)
+        
+        attributes = None
+        
+        mu, logvar, boxes_pred, angles_pred = model(objs, triples, boxes,
+                                                    angles=angles, attributes=attributes)
+        
+        # loss calculation
+        total_loss = 0  
+        recon_loss = F.l1_loss(boxes_pred, boxes)
+        angle_loss = F.nll_loss(angles_pred, angles)
+        try:
+            gauss_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp()) / mu.size(0)
 
-            if 'points' in data['decoder']:
-                dec_points = data['decoder']['points']
-                dec_points = dec_points.cuda()
+        except:
+            logger.warn("blowup!!!")
+            logger.warn("logvar", torch.sum(logvar.data), torch.sum(torch.abs(logvar.data)), torch.max(logvar.data),
+                torch.min(logvar.data))
+            logger.warn("mu", torch.sum(mu.data), torch.sum(torch.abs(mu.data)), torch.max(mu.data), torch.min(mu.data))
+        
+        train_losses['recon_loss'].append(recon_loss.item())
+        train_losses['angle_loss'].append(angle_loss.item())
+        train_losses['KL_Gauss_loss'].append(gauss_loss.item())
+        
+        loss = recon_loss + angle_loss + args.kl_weight * gauss_loss
+        
+        train_losses['total_loss'].append(loss.item())
+        
+        loss.backward()
+
+        # Cap the occasional super mutant gradient spikes
+        # Do now a gradient step and plot the losses
+        clip_grad_norm_(model.parameters(), args.max_grad_norm)
+        
+        for group in optimizer.param_groups:
+            for p in group['params']:
+                if p.grad is not None and p.requires_grad and torch.isnan(p.grad).any():
+                    logger.info("NaN grad in {}th iteration in {}th epoch.".format(i, epoch))
+                    p.grad[torch.isnan(p.grad)] = 0
+        
+        optimizer.step()
+
+    for key in train_losses.keys():
+        train_losses[key] = np.asarray(train_losses[key])
+        train_losses[key] = np.mean(train_losses[key])
+    
+    if args.use_wandb:
+        wandb.log({"[Train] recon_loss": train_losses['recon_loss'],
+                   "[Train] angle_loss": train_losses['angle_loss'],
+                   "[Train] KL_Gauss_loss": train_losses['KL_Gauss_loss'],
+                   "[Train] total_loss": train_losses['total_loss']})
+    
+    return train_losses
+
+        
+
+@torch.no_grad()
+def val_one_epoch(args, model, val_loader, epoch):
+    if args.visualize:
+        visualizer = SceneVisualizer()
+
+    model.eval()
+    val_losses = {'recon_loss': [], 'angle_loss': [], 'KL_Gauss_loss': [], 'total_loss': []}
+    for i, data in enumerate(tqdm(val_loader, desc='Validate')):
+        # skip invalid data
+        if data == -1:
+            continue
+        
+        try:
+            objs = data['objs'].to(args.device)
+            triples = data['triples'].to(args.device)
+            tight_boxes = data['boxes'].to(args.device)
 
         except Exception as e:
             print('Exception', str(e))
             continue
         
+        # separate boxes and angles from tight_boxes
+        # limit the angle bin range from 0 to 24
+        boxes = tight_boxes[:, :6]
+        angles = tight_boxes[:, 6].long() - 1 
+        angles = torch.where(angles > 0, angles, torch.zeros_like(angles))
+        angles = torch.where(angles < 24, angles, torch.zeros_like(angles))
+        
+        attributes = None
+        
+        mu, logvar, boxes_pred, angles_pred = model(objs, triples, boxes,
+                                                    angles=angles, attributes=attributes)
+        
+        # loss calculation
+        total_loss = 0
+        recon_loss = F.l1_loss(boxes_pred, boxes)
+        angle_loss = F.nll_loss(angles_pred, angles)
+        try:
+            gauss_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp()) / mu.size(0)
 
-def train(iter):
-    # Load data
-    batch = next(train_iter)
-    x = batch['pointcloud'].to(args.device)
+        except:
+            logger.warn("blowup!!!")
+            logger.warn("logvar", torch.sum(logvar.data), torch.sum(torch.abs(logvar.data)), torch.max(logvar.data),
+                torch.min(logvar.data))
+            logger.warn("mu", torch.sum(mu.data), torch.sum(torch.abs(mu.data)), torch.max(mu.data), torch.min(mu.data))
 
-    # Reset grad and model state
-    optimizer.zero_grad()
-    model.train()
+        val_losses['recon_loss'].append(recon_loss.item())
+        val_losses['angle_loss'].append(angle_loss.item())
+        val_losses['KL_Gauss_loss'].append(gauss_loss.item())
+        
+        total_loss = recon_loss + angle_loss + args.kl_weight * gauss_loss
+        
+        val_losses['total_loss'].append(total_loss.item())
 
-    # Forward
-    loss = model(x)
-
-    # Backward and optimize
-    loss.backward()
-    orig_grad_norm = clip_grad_norm_(model.parameters(), args.max_grad_norm)
-    optimizer.step()
-    scheduler.step()
-
-    if args.use_wandb:
-        wandb.log({"train_iter": iter, "train_loss": loss})
-
-    if iter % 1000 == 0:
-        logger.info('[Train] Iter {:04d} | Loss {:.6f} | Grad {:.4f} '.format(it, loss.item(), orig_grad_norm))
-
-def validate_loss(iter):
-
-    all_refs = []
-    all_recons = []
-    for i, batch in enumerate(tqdm(val_loader, desc='Validate')):
-        if args.num_val_batches > 0 and i >= args.num_val_batches:
-            break
-        ref = batch['pointcloud'].to(args.device)
-        shift = batch['shift'].to(args.device)
-        scale = batch['scale'].to(args.device)
-        with torch.no_grad():
-            model.eval()
-            code = model.encode(ref)
-            recons = model.decode(code, flexibility=args.flexibility)
-        all_refs.append(ref * scale + shift)
-        all_recons.append(recons * scale + shift)
-
-    all_refs = torch.cat(all_refs, dim=0)
-    all_recons = torch.cat(all_recons, dim=0)
-    metrics = EMD_CD(all_recons, all_refs, batch_size=args.val_batch_size)
-    cd, emd = metrics['MMD-CD'].item(), metrics['MMD-EMD'].item()
+    for key in val_losses.keys():
+        val_losses[key] = np.asarray(val_losses[key])
+        val_losses[key] = np.mean(val_losses[key])
     
     if args.use_wandb:
-        wandb.log({"val_iter": iter, "CD_loss_val": cd, "EMD_loss_val": emd})
-    logger.info('[Val] Iter {:04d} | CD {:.6f} | EMD {:.6f}  '.format(iter, cd, emd))
-
-    return cd
-
-
-def validate_inspect(iter):
-    visualizer = ObjectVisualizer()
-    sum_n = 0
-    sum_chamfer = 0
-    for i, batch in enumerate(tqdm(val_loader, desc='Inspect')):
-        x = batch['pointcloud'].to(args.device)
-        if i == 0:
-            logger.info('refence category: {} in {}th iteration'.format(batch['cate'][i], iter))
-        model.eval()
-        code = model.encode(x)
-        recons = model.decode(code, flexibility=args.flexibility).detach()
-
-        sum_n += x.size(0)
-        if i >= args.num_inspect_batches:
-            break   # Inspect only 5 batch
+        wandb.log({"[Val] recon_loss": val_losses['recon_loss'],
+                   "[Val] angle_loss": val_losses['angle_loss'],
+                   "[Val] KL_Gauss_loss": val_losses['KL_Gauss_loss'],
+                   "[Val] total_loss": val_losses['total_loss']})
     
-    arr_pc = recons.cpu().detach().numpy().reshape(-1,3) # only visualize the first batch(first category)
-
-    visualizer.visualize(arr_pc)
+    if args.visualize:
+        visualizer.visualize(boxes_pred, angles_pred)
+    
+    return val_losses
 
 #============================================================
 # Main
@@ -135,23 +195,30 @@ def validate_inspect(iter):
 
 if __name__ == '__main__':
     # Arguments for training
-    args, arg_msg, device_msg = DiffusionAETrainOptions().parse()
+    args, arg_msg, device_msg = SGVAETrainOptions().parse()
 
     if args.debug:
-        args.data_dir = '/root/hdd1/G3D/GT'
-        # args.data_dir_3RScan = '/root/hdd1/G3D/3RScan'
-        args.name = 'G2S_SGVAE_practice_230529'
+        args.data_dir = '/root/hdd1/G2S/SceneGraphData'
+        args.name = 'G2S_SGVAE_practice_230531_64_False'
         args.gpu_ids = '0'
         args.exps_dir = '/root/hdd1/G2S/practice'
-        args.train_batch_size = 48
+        args.verbose = True
+        
+        args.num_epochs = 100
+        args.train_batch_size = 32
         args.num_treads = 8
         args.lr = 0.0001
-        args.num_epochs = 200
-        
-        args.path2ae = '/root/hdd1/G2S/practice/G2S_DPMPC_practice_230529/ckpts/ckpt_100000.pt'
-        
+        args.val_freq = 10
+        args.save_freq = 20
+
         args.use_wandb = True
+        args.wandb_entity = 'ray_park'
+        args.wandb_project_name = 'G2S'
         args.visualize = False
+        
+        args.gconv_dim = 64 # TODO: 128 비교
+        args.residual = False # TODO: True 비교
+        args.kl_weight = 0.1
 
     # get logger and checkpoint manager
     exp_dir = os.path.join(args.exps_dir, args.name, "ckpts")
@@ -174,28 +241,35 @@ if __name__ == '__main__':
             name=args.name + "_train"
         )
     
-    # prepare pre-trained autoencoder used to shape generation
-    logger.info("Loading pre-trained autoencoder... ")
-    ckpt = torch.load(args.path2ae, map_location=args.device)
-    model = DiffusionAE(ckpt['args']).to(args.device)
-    model.load_state_dict(ckpt['state_dict'])
+    # # prepare pre-trained autoencoder used to shape generation
+    # logger.info("Loading pre-trained autoencoder... ")
+    # ckpt = torch.load(args.path2ae, map_location=args.device)
+    # model = DiffusionAE(ckpt['args']).to(args.device)
+    # model.load_state_dict(ckpt['state_dict'])
 
-    # Datasets and loaders : TODO
+    # Datasets and loaders
     logger.info("Loading datasets...")
-    train_dataset = SGDataset(
-        path=args.data_dir
-        # TODO
+    dataset = SceneGraphDataset(
+        args=args,
+        data_dir=args.data_dir,
+        categories=args.categories,
+        use_seed=True,
+        split='train'
     )
-    val_dataset = SGDataset(
-        path=args.data_dir,
-        # TODO
-    )
+    
+    # randomly split the training dataset and validation dataset
+    train_size = int(0.97 * len(dataset)) # 1141
+    val_size = len(dataset) - train_size # 36
+    
+    train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
 
     train_loader = DataLoader(dataset=train_dataset,
                             batch_size=args.train_batch_size,
+                            collate_fn=collate_fn_sgvae,
                             shuffle=True)
     val_loader = DataLoader(dataset=val_dataset,
                             batch_size=args.val_batch_size,
+                            collate_fn=collate_fn_sgvae,
                             shuffle=False)
 
     # Model
@@ -203,14 +277,16 @@ if __name__ == '__main__':
     if args.continue_train:
         logger.info("Continue training from checkpoint...")
         ckpt = torch.load(args.ckpt_path)
-        model = SceneGraphVAE(ckpt['args']).to(args.device)
+        model = LayoutVAE(vocab=dataset.vocab, embedding_dim=args.gconv_dim,
+                          residual=args.residual, gconv_pooling=args.pooling).to(args.device)
         model.load_state_dict(ckpt['state_dict'])
     else:
-        model = SceneGraphVAE(args).to(args.device)
+        model = LayoutVAE(vocab=dataset.vocab, embedding_dim=args.gconv_dim,
+                          residual=args.residual, gconv_pooling=args.pooling).to(args.device)
 
     if args.use_wandb:
         wandb.watch(model, log="all")
-    logger.info(print_model(model))
+    logger.info(print_model(model, verbose=args.verbose))
 
 
     # Optimizer and scheduler
@@ -220,32 +296,22 @@ if __name__ == '__main__':
     # Main loop
     logger.info("Start training...")
     try:
-        for epoch in range(args.num_epochs):
+        for epoch in range(1, args.num_epochs + 1):
             epoch_start_time = time.time()
-            train_one_epoch()
-            logger.info("End of epoch {}/{} \t Time taken: {} sec".format(epoch, args.num_epochs, time.time() - epoch_start_time))
-
-        it = 1
-        while it <= args.max_iters:
-            # Training
-            train(it)
+            train_loss = train_one_epoch(args, model, train_loader, optimizer, epoch)
+            logger.info('[Train] Epoch {}/{} | Loss {:.6f} | Time {:.4f} sec'.format(epoch,
+                args.num_epochs, train_loss['total_loss'], time.time() - epoch_start_time))
             
-            # Validation
-            if it % args.val_freq == 0 or it == args.max_iters:
-                with torch.no_grad():
-                    cd_loss = validate_loss(it)
-                    
-                    if args.visualize:
-                        validate_inspect(it)
-                        logger.info("Continue training...")
-
+            val_loss = val_one_epoch(args, model, val_loader, epoch)
+            logger.info('[Val] Loss {:.6f}'.format(val_loss['total_loss']))
+            
+            if epoch % args.save_freq == 0:
                 opt_states = {
                     'optimizer': optimizer.state_dict()
                 }
-                # save model
-                save_fname = "ckpt_{}.pt".format(int(it))
-                ckpt_mgr.save(model, args, score=cd_loss, others=opt_states, step=it) # misc.py
-            it += 1
+                ckpt_mgr.save(model, args, score=val_loss['total_loss'],
+                            others=opt_states, step=epoch)
+
         logger.info("Training completed!")
         logger.flush()
         if args.use_wandb:

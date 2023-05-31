@@ -118,8 +118,7 @@ class SceneVisualizer(BaseVisualizer):
     
     def visualize(self):
         """
-        visualize objects and bounding boxes. You can also visualize
-        either objects or bounding boxes.
+        visualize objects and bounding boxes.
         """
         pass
     

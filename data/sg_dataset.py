@@ -49,20 +49,11 @@ cate_to_id = {v: k for k, v in id_to_cate_overlapped_with_3rscan.items()}
 
 
 class SceneGraphDataset(Dataset):
-    def __init__(self, args, categories, use_seed=True, split='train'):
-        """Properties of the dataset
-        vocab (): information about classes, relationships
-        filelist (): file names containing 'train' or 'test'
-        rel_json_file, box_json_file, floor_json_file (): 
-        
-        """
-        # args에 추가할 내용: args.crop_useless, args.center_scene_to_floor,
-        # args.use_large_dataset, args.use_canonical, args.use_scene_rels,
-        # args.use_scene_splits, args.label_fname
-        # args.shuffle_objs, args.use_rio27
+    def __init__(self, args, data_dir, categories, use_seed=True, split='train'):
         
         # dataset arguments
         self.args = args
+        self.data_dir = data_dir
         args.center_scene_to_floor
         
         if eval and use_seed:
@@ -70,10 +61,10 @@ class SceneGraphDataset(Dataset):
                 self.seed = args.seed
             else:
                 self.seed = 47
-        seed_all(self.seed)
+            seed_all(self.seed)
         
-        self.sgdata_dir = os.path.join(args.data_dir, "Graph")
-        self.scandata_dir = os.path.join(args.data_dir, "3RScan")
+        self.sgdata_dir = os.path.join(self.data_dir, "Graphs")
+        self.scandata_dir = os.path.join(self.data_dir, "3RScan")
         
         # class categories
         if 'all' in categories:
@@ -90,7 +81,7 @@ class SceneGraphDataset(Dataset):
             self.vocab['pred_idx_to_name'] = f.readlines()
         
         # list of the name of txt files according to the split(train or test)
-        with open(os.path.join(self.sgdata_dir, "{}.txt".format(split)), "r") as read_file:
+        with open(os.path.join(self.sgdata_dir, "{}_scans.txt".format(split)), "r") as read_file:
             self.filelist = [file.rstrip() for file in read_file.read().splitlines()]
         
         # list of relationship categories
@@ -100,12 +91,12 @@ class SceneGraphDataset(Dataset):
         # use scene sections of up to 9 objects if true, or full scenes otherwise
         self.use_scene_splits = args.use_scene_splits
         if split == 'train': # training set
-            splits_fname = 'relationships_train_clean' if self.use_splits else 'relationships_merged_train_clean'
+            splits_fname = 'relationships_train_clean' if self.use_scene_splits else 'relationships_merged_train_clean'
             self.rel_json_file = os.path.join(self.sgdata_dir, '{}.json'.format(splits_fname))
             self.box_json_file = os.path.join(self.sgdata_dir, 'obj_boxes_train_refined.json')
             self.floor_json_file = os.path.join(self.sgdata_dir, 'floor_boxes_split_train.json')
         elif split == 'test': # test set
-            splits_fname = 'relationships_test_clean' if self.use_splits else 'relationships_merged_test_clean'
+            splits_fname = 'relationships_test_clean' if self.use_scene_splits else 'relationships_merged_train_clean'
             self.rel_json_file = os.path.join(self.sgdata_dir, '{}.json'.format(splits_fname))
             self.box_json_file = os.path.join(self.sgdata_dir, 'obj_boxes_test_refined.json')
             self.floor_json_file = os.path.join(self.sgdata_dir, 'floor_boxes_split_test.json')
@@ -117,7 +108,7 @@ class SceneGraphDataset(Dataset):
                 self.cropped_data = json.load(read_file)
         
         self.relationship_json, self.objs_json, self.tight_boxes_json = \
-            self.read_relatinoship_json(self.rel_json_file, self.box_json_file)
+            self.read_relationship_json(self.rel_json_file, self.box_json_file)
         
         # TODO: use_rio27 (또는 다른 방법으로) mapping, classes_rio27.json 직접 만들어야 할 듯
         if args.use_rio27:
@@ -132,10 +123,10 @@ class SceneGraphDataset(Dataset):
         with open(self.catfile, "r") as f:
             for line in f:
                 category = line.rstrip()
-                if category in categories:
+                if category in self.categories:
                     self.cates[category] = category
-        self.cates.sort()
-        self.classes = dict(zip(self.cates), range(len(self.cates))) # TODO: print해보기
+        self.cates # {'label': 'label'}
+        self.classes = dict(zip(sorted(self.cates), range(len(self.cates)))) # {'label': id}
         
         # TODO: shape 정상적인 layout만 학습하도록 handling 필요
 
@@ -265,7 +256,7 @@ class SceneGraphDataset(Dataset):
 
         # instance2label, e.g. {1: 'floor', 2: 'wall', 3: 'picture', 4: 'picture'}
         instance2label = self.load_semseg(semseg_file)
-        selected_instances = list(self.objs_json[scan_id].keys()) # ids of instances only used for training
+        selected_instances = list(self.objs_json[scan_id_with_split].keys()) # ids of instances only used for training
         keys = list(instance2label.keys())
         
         if self.args.shuffle_objs:
@@ -300,6 +291,9 @@ class SceneGraphDataset(Dataset):
 
             # mask to cat:
             if (scene_class_id >= 0) and (scene_instance_id > 0) and (key in selected_instances):
+                if self.args.use_canonical:
+                    direction = self.tight_boxes_json[scan_id_with_split][key]['direction']
+
                 cat.append(scene_class_id)
                 bbox = self.tight_boxes_json[scan_id_with_split][key]['param7'].copy()
                 if self.args.crop_useless and key in self.cropped_data[scan_id][split].keys():
@@ -363,3 +357,75 @@ class SceneGraphDataset(Dataset):
     
     def __len__(self):
         return len(self.scans)
+
+
+def collate_fn_sgvae(batch):
+    """
+    Collate function to be used when wrapping a SceneGraphDataset in a
+    DataLoader. Returns a dictionary
+    """
+
+    out = {}
+
+    out['scan_id'] = []
+    out['split_id'] = []
+    out['instance_id'] = []
+
+    global_node_id = 0
+    
+    all_objs, all_boxes, all_triples = [], [], []
+    all_obj_to_scene, all_triple_to_scene = [], []
+    
+    obj_offset = 0
+
+    for i in range(len(batch)):
+        if batch[i] == -1:
+            raise ValueError("Invalid value in batch data")
+
+        # information about data
+        out['scan_id'].append(batch[i]['scan_id'])
+        out['instance_id'].append(batch[i]['instance_id'])
+        out['split_id'].append(batch[i]['split_id'])
+
+        global_node_id += len(batch[i]['objs'])
+        
+        # objects, triplets, boxes
+        (objs, triples, boxes) = batch[i]['objs'], batch[i]['triples'], batch[i]['boxes']
+
+        num_objs, num_triples = objs.size(0), triples.size(0)
+
+        all_objs.append(objs)
+        all_boxes.append(boxes)
+
+        if triples.dim() > 1:
+            triples = triples.clone()
+            triples[:, 0] += obj_offset
+            triples[:, 2] += obj_offset
+
+            all_triples.append(triples)
+            all_triple_to_scene.append(torch.LongTensor(num_triples).fill_(i))
+
+        all_obj_to_scene.append(torch.LongTensor(num_objs).fill_(i))
+
+        obj_offset += num_objs
+
+    all_objs = torch.cat(all_objs)
+    all_boxes = torch.cat(all_boxes)
+
+    all_obj_to_scene = torch.cat(all_obj_to_scene)
+
+    if len(all_triples) > 0:
+        all_triples = torch.cat(all_triples)
+        all_triple_to_scene = torch.cat(all_triple_to_scene)
+    else:
+        return -1
+
+    outputs = {'objs': all_objs,
+                'triples': all_triples,
+                'boxes': all_boxes,
+                'obj_to_scene': all_obj_to_scene,
+                'tiple_to_scene': all_triple_to_scene}
+
+    out = outputs
+
+    return out

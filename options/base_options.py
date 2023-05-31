@@ -50,7 +50,7 @@ class BaseOptions():
         """Print arguments
         It will print both current args and default values(if different).
         """
-        message = ''
+        message = 'Arguments info\n'
         message += '--------------- Arguments ---------------\n'
         for k, v in sorted(vars(self.args).items()):
             comment = ''
@@ -70,26 +70,12 @@ class BaseOptions():
         """
         message = 'Device info\n'
         message += '--------------- Device ---------------\n'
-        message += 'Device: \n'.format(self.device)
-        message += 'Current cuda device: \n'.format(torch.cuda.current_device())
+        message += 'Device: {} \n'.format(self.device)
+        message += 'Current cuda device: {} \n'.format(torch.cuda.current_device())
         message += '----------------- End -------------------'
         message += ''
 
         return message
-    
-    def set_gpus(self, args):
-        str_ids = args.gpu_ids.split(',')
-        args.gpu_ids = []
-        for str_id in str_ids:
-            id = int(str_id)
-            if id >= 0:
-                args.gpu_ids.append(id)
-        
-        if len(args.gpu_ids) > 0:
-            self.device = torch.device('cuda:{}'.format(args.gpu_ids[0])) # TODO: DDP 활용 시 변경
-            torch.cuda.set_device(self.device)
-        else:
-            raise ValueError('Invalid gpu ID specified. Please provide at least one valid GPU ID.')
 
     def parse(self, parser=None):
         """Parse our arguments, create checkpoints directory suffix, and set up gpu device."""
@@ -133,7 +119,8 @@ class TrainOptions(BaseOptions):
         parser = BaseOptions.initialize(self, parser)
 
         # network saving and loading parameters
-        parser.add_argument('--val_freq', type=int, default=5000, help='frequency of validation(also saving model)')
+        parser.add_argument('--val_freq', type=int, default=10, help='frequency of validation when training by iteration')
+        parser.add_argument('--save_freq', type=int, default=20, help='frequency of saving model.')
         parser.add_argument('--save_by_iter', type=str2bool, default=False, help='whether saves model by iteration')
         parser.add_argument('--continue_train', type=str2bool, default=False, help='continue training: load the latest model')
         parser.add_argument('--ckpt_path', type=str, default='./exps/ckpt', help='checkpoint path to start training')

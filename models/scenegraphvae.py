@@ -7,42 +7,71 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+class LayoutVAE(nn.Module):
+
+    def __init__(self, vocab=None, embedding_dim=64, residual=False, gconv_pooling='avg', num_box_params=6):
+        super().__init__()
+
+        self.vocab = vocab
+        self.vae_box = SceneGraphVAE(vocab, embedding_dim=embedding_dim, decoder_cat=True, mlp_normalization="layer",
+                            input_dim=num_box_params, residual=residual, gconv_pooling=gconv_pooling, gconv_num_layers=5)
+
+    def forward(self, objs, triples, boxes, angles=None, attributes=None):
+
+        (mu_boxes, logvar_boxes) = self.vae_box.encoder(objs, triples, boxes, attributes=attributes, angles_gt=angles)
+        std_box = torch.exp(0.5 * logvar_boxes) # reparameterization
+        eps_box = torch.randn_like(std_box) # standard sampling
+        z_boxes = eps_box.mul(std_box).add_(mu_boxes)
+        boxes_pred, angles_pred = self.vae_box.decoder(z_boxes, objs, triples, attributes) # output: d3_pred, angles_pred
+        return mu_boxes, logvar_boxes, boxes_pred, angles_pred
+
+    def load_networks(self, exp, epoch, strict=True):
+        self.vae_box.load_state_dict(
+            torch.load(os.path.join(exp, 'checkpoint', 'model_box_{}.pth'.format(epoch))),
+            strict=strict
+        )
+
+    def compute_statistics(self, exp, epoch, stats_dataloader, force=False):
+        box_stats_f = os.path.join(exp, 'checkpoint', 'model_stats_box_{}.pkl'.format(epoch))
+
+        if os.path.exists(box_stats_f) and not force:
+            stats = pickle.load(open(box_stats_f, 'rb'))
+            self.mean_est_box, self.cov_est_box = stats[0], stats[1]
+        else:
+            self.mean_est_box, self.cov_est_box = self.vae_box.collect_train_statistics(stats_dataloader)
+            pickle.dump([self.mean_est_box, self.cov_est_box], open(box_stats_f, 'wb'))
+
+    def sample_box(self, dec_objs, dec_triplets, attributes=None):
+        return self.vae_box.sampleBoxes(self.mean_est_box, self.cov_est_box, dec_objs, dec_triplets, attributes)
+
+    # def save(self, exp, outf, epoch):
+    #     torch.save(self.vae_box.state_dict(), os.path.join(exp, outf, 'model_box_{}.pth'.format(epoch)))
+
+
 class SceneGraphVAE(nn.Module):
     """
     VAE-based network for layout generation of the scene from a scene graph. (No manipulation)
     It has an embedding of bounding box latents.
     """
-    def __init__(self, vocab, embedding_dim=128, batch_size=32,
-                 train_3d=True,
-                 decoder_cat=False,
-                 input_dim=6,
-                 gconv_pooling='avg', gconv_num_layers=5,
-                 mlp_normalization='none',
-                 vec_noise_dim=0,
-                 replace_latent=False,
-                 residual=False,
-                 use_angles=False,
-                 autoencoder=None):
+    def __init__(self, vocab, embedding_dim=128, batch_size=32, decoder_cat=True, input_dim=6,
+                 gconv_pooling='avg', gconv_num_layers=5, mlp_normalization='none', vec_noise_dim=0,
+                 residual=False):
         super().__init__()
 
         gconv_dim = embedding_dim
         gconv_hidden_dim = gconv_dim * 4
         box_embedding_dim = int(embedding_dim)
-        if use_angles:
-            angle_embedding_dim = int(embedding_dim / 4)
-            box_embedding_dim = int(embedding_dim * 3 / 4)
-            Nangle = 24
+
+        angle_embedding_dim = int(embedding_dim / 4)
+        box_embedding_dim = int(embedding_dim * 3 / 4)
+        Nangle = 24
         obj_embedding_dim = embedding_dim
 
-        self.replace_all_latent = replace_latent
         self.batch_size = batch_size
         self.embedding_dim = embedding_dim
-        self.train_3d = train_3d
         self.decoder_cat = decoder_cat
         self.vocab = vocab
         self.vec_noise_dim = vec_noise_dim
-        self.use_angles = use_angles
-        self.autoencoder = autoencoder
 
         num_objs = len(vocab['object_idx_to_name'])
         num_preds = len(vocab['pred_idx_to_name'])
@@ -54,21 +83,18 @@ class SceneGraphVAE(nn.Module):
         self.pred_embeddings_dc = nn.Embedding(num_preds, embedding_dim)
         if self.decoder_cat:
             self.pred_embeddings_dc = nn.Embedding(num_preds, embedding_dim * 2)
-            self.pred_embeddings_man_dc = nn.Embedding(num_preds, embedding_dim * 3)
         self.d3_embeddings = nn.Linear(input_dim, box_embedding_dim)
-        if self.use_angles:
-            self.angle_embeddings = nn.Embedding(Nangle, angle_embedding_dim)
+        self.angle_embeddings = nn.Embedding(Nangle, angle_embedding_dim)
 
         # weight sharing of mean and var
         self.mean_var = make_mlp([embedding_dim * 2, gconv_hidden_dim, embedding_dim * 2],
                                      batch_norm=mlp_normalization)
         self.mean = make_mlp([embedding_dim * 2, box_embedding_dim], batch_norm=mlp_normalization, norelu=True)
         self.var = make_mlp([embedding_dim * 2, box_embedding_dim], batch_norm=mlp_normalization, norelu=True)
-        if self.use_angles:
-            self.angle_mean_var = make_mlp([embedding_dim * 2, gconv_hidden_dim, embedding_dim * 2],
-                                           batch_norm=mlp_normalization)
-            self.angle_mean = make_mlp([embedding_dim * 2, angle_embedding_dim], batch_norm=mlp_normalization, norelu=True)
-            self.angle_var = make_mlp([embedding_dim * 2, angle_embedding_dim], batch_norm=mlp_normalization, norelu=True)        # graph conv net
+        self.angle_mean_var = make_mlp([embedding_dim * 2, gconv_hidden_dim, embedding_dim * 2],
+                                        batch_norm=mlp_normalization)
+        self.angle_mean = make_mlp([embedding_dim * 2, angle_embedding_dim], batch_norm=mlp_normalization, norelu=True)
+        self.angle_var = make_mlp([embedding_dim * 2, angle_embedding_dim], batch_norm=mlp_normalization, norelu=True)        # graph conv net
         self.gconv_net_ec = None
         self.gconv_net_dc = None
 
@@ -100,10 +126,9 @@ class SceneGraphVAE(nn.Module):
         net_layers = [gconv_dim * 2, gconv_hidden_dim, input_dim]
         self.d3_net = make_mlp(net_layers, batch_norm=mlp_normalization, norelu=True)
 
-        if self.use_angles:
-            # angle prediction net
-            angle_net_layers = [gconv_dim * 2, gconv_hidden_dim, Nangle]
-            self.angle_net = make_mlp(angle_net_layers, batch_norm=mlp_normalization, norelu=True)
+        # angle prediction net
+        angle_net_layers = [gconv_dim * 2, gconv_hidden_dim, Nangle]
+        self.angle_net = make_mlp(angle_net_layers, batch_norm=mlp_normalization, norelu=True)
 
         # initialization
         self.d3_embeddings.apply(_init_weights)
@@ -111,11 +136,9 @@ class SceneGraphVAE(nn.Module):
         self.mean.apply(_init_weights)
         self.var.apply(_init_weights)
         self.d3_net.apply(_init_weights)
-
-        if self.use_angles:
-            self.angle_mean_var.apply(_init_weights)
-            self.angle_mean.apply(_init_weights)
-            self.angle_var.apply(_init_weights)
+        self.angle_mean_var.apply(_init_weights)
+        self.angle_mean.apply(_init_weights)
+        self.angle_var.apply(_init_weights)
 
     def encoder(self, objs, triples, boxes_gt, attributes, angles_gt=None):
         O, T = objs.size(0), triples.size(0)
@@ -127,11 +150,8 @@ class SceneGraphVAE(nn.Module):
         pred_vecs = self.pred_embeddings_ec(p)
         d3_vecs = self.d3_embeddings(boxes_gt)
 
-        if self.use_angles:
-            angle_vecs = self.angle_embeddings(angles_gt)
-            obj_vecs = torch.cat([obj_vecs, d3_vecs, angle_vecs], dim=1)
-        else:
-            obj_vecs = torch.cat([obj_vecs, d3_vecs], dim=1)
+        angle_vecs = self.angle_embeddings(angles_gt)
+        obj_vecs = torch.cat([obj_vecs, d3_vecs, angle_vecs], dim=1)
 
         if self.gconv_net_ec is not None:
             obj_vecs, pred_vecs = self.gconv_net_ec(obj_vecs, pred_vecs, edges)
@@ -140,16 +160,16 @@ class SceneGraphVAE(nn.Module):
         mu = self.mean(obj_vecs_3d)
         logvar = self.var(obj_vecs_3d)
 
-        if self.use_angles:
-            obj_vecs_angle = self.angle_mean_var(obj_vecs)
-            mu_angle = self.angle_mean(obj_vecs_angle)
-            logvar_angle = self.angle_var(obj_vecs_angle)
-            mu = torch.cat([mu, mu_angle], dim=1)
-            logvar = torch.cat([logvar, logvar_angle], dim=1)
+        obj_vecs_angle = self.angle_mean_var(obj_vecs)
+        mu_angle = self.angle_mean(obj_vecs_angle)
+        logvar_angle = self.angle_var(obj_vecs_angle)
+        
+        mu = torch.cat([mu, mu_angle], dim=1)
+        logvar = torch.cat([logvar, logvar_angle], dim=1)
 
         return mu, logvar
 
-    def decoder(self, z, objs, triples, attributes, manipulate=False):
+    def decoder(self, z, objs, triples, attributes):
         s, p, o = triples.chunk(3, dim=1)  # All have shape (T, 1)
         s, p, o = [x.squeeze(1) for x in [s, p, o]]  # Now have shape (T,)
         edges = torch.stack([s, o], dim=1)  # Shape is (T, 2)
@@ -157,61 +177,25 @@ class SceneGraphVAE(nn.Module):
         obj_vecs = self.obj_embeddings_dc(objs)
         pred_vecs = self.pred_embeddings_dc(p)
 
-        # concatenate noise first
-        if self.decoder_cat:
+        if self.decoder_cat: # concatenate noise first
             obj_vecs = torch.cat([obj_vecs, z], dim=1)
             obj_vecs, pred_vecs = self.gconv_net_dc(obj_vecs, pred_vecs, edges)
-
-        # concatenate noise after gconv
-        else:
+        else: # concatenate noise after gconv
             obj_vecs, pred_vecs = self.gconv_net_dc(obj_vecs, pred_vecs, edges)
             obj_vecs = torch.cat([obj_vecs, z], dim=1)
 
         d3_pred = self.d3_net(obj_vecs)
-        if self.use_angles:
-            angles_pred = F.log_softmax(self.angle_net(obj_vecs), dim=1)
-            return d3_pred, angles_pred
-        else:
-            return d3_pred
+        angles_pred = F.log_softmax(self.angle_net(obj_vecs), dim=1)
+        return d3_pred, angles_pred
 
-    def forward_no_mani(self, objs, triples, enc, attributes): # TODO: forward로 수정
+    def forward(self, objs, triples, enc, attributes):
         mu, logvar = self.encoder(objs, triples, enc, attributes)
-        # reparameterization
-        std = torch.exp(0.5 * logvar)
-        # standard sampling
-        eps = torch.randn_like(std)
+
+        std = torch.exp(0.5 * logvar) # reparameterization
+        eps = torch.randn_like(std) # standard sampling
         z = eps.mul(std).add_(mu)
-        keep = []
-        dec_man_enc_pred = self.decoder(z, objs, triples, attributes)
-        for i in range(len(dec_man_enc_pred)):
-            keep.append(1)
-        keep = torch.from_numpy(np.asarray(keep).reshape(-1, 1)).float().cuda()
-        return mu, logvar, dec_man_enc_pred, keep
-
-    # TODO: shape sample은 따로 뺄 것
-    def sampleShape(self, point_classes_idx, point_ae, mean_est_shape, cov_est_shape, dec_objs, dec_triplets,
-                    attributes=None):
-        with torch.no_grad():
-            z_shape = []
-            for idxz in dec_objs:
-                idxz = int(idxz.cpu())
-                if idxz in point_classes_idx:
-                    z_shape.append(torch.from_numpy(
-                        np.random.multivariate_normal(mean_est_shape[idxz], cov_est_shape[idxz], 1)).float().cuda())
-                else:
-                    z_shape.append(torch.from_numpy(np.random.multivariate_normal(mean_est_shape[-1],
-                                                                                  cov_est_shape[-1],
-                                                                                  1)).float().cuda())
-            z_shape = torch.cat(z_shape, 0)
-
-            dc_shapes = self.decoder(z_shape, dec_objs, dec_triplets, attributes)
-            if self.autoencoder == 'atlas':
-                points = point_ae.forward_inference_from_latent_space(dc_shapes, point_ae.get_grid())
-            elif self.autoencoder == 'dpmpc':
-                points = point_ae.decode(dc_shapes)
-            else:
-                raise ValueError("There is no point autoencoder")
-        return points, dc_shapes
+        pred = self.decoder(z, objs, triples, attributes)
+        return mu, logvar, pred
 
     @torch.no_grad()
     def sampleBoxes(self, mean_est, cov_est, dec_objs, dec_triplets, attributes=None):
@@ -219,16 +203,10 @@ class SceneGraphVAE(nn.Module):
 
         return self.decoder(z, dec_objs, dec_triplets, attributes)
 
-    def collect_train_statistics(self, train_loader, with_points=False):
+    # TODO: 정확히 어떻게 쓰이는지 training code 짠 후 확인
+    def collect_train_statistics(self, train_loader):
         # model = model.eval()
         mean_cat = None
-        if with_points:
-            means, vars = {}, {}
-            for idx in train_loader.dataset.point_classes_idx:
-                means[idx] = []
-                vars[idx] = []
-            means[-1] = []
-            vars[-1] = []
 
         for idx, data in enumerate(train_loader):
             if data == -1:
@@ -254,192 +232,26 @@ class SceneGraphVAE(nn.Module):
             angles = torch.where(angles > 0, angles, torch.zeros_like(angles))
             attributes = None
 
-            if with_points:
-                mask = [ob in train_loader.dataset.point_classes_idx for ob in objs]
-                if sum(mask) <= 0:
-                    continue
-                mean, logvar = self.encoder(objs, triples, encoded_points, attributes)
-                mean, logvar = mean.cpu().clone(), logvar.cpu().clone()
-            else:
-                mean, logvar = self.encoder(objs, triples, boxes, attributes, angles)
-                mean, logvar = mean.cpu().clone(), logvar.cpu().clone()
-
             mean = mean.data.cpu().clone()
-            if with_points:
-                for i in range(len(objs)):
-                    if objs[i] in train_loader.dataset.point_classes_idx:
-                        means[int(objs[i].cpu())].append(mean[i].detach().cpu().numpy())
-                        vars[int(objs[i].cpu())].append(logvar[i].detach().cpu().numpy())
-                    else:
-                        means[-1].append(mean[i].detach().cpu().numpy())
-                        vars[-1].append(logvar[i].detach().cpu().numpy())
+
+            if mean_cat is None:
+                mean_cat = mean
             else:
-                if mean_cat is None:
-                    mean_cat = mean
-                else:
-                    mean_cat = torch.cat([mean_cat, mean], dim=0)
+                mean_cat = torch.cat([mean_cat, mean], dim=0)
 
-        if with_points:
-            for idx in train_loader.dataset.point_classes_idx + [-1]:
-                if len(means[idx]) < 3:
-                    means[idx] = np.zeros(128)
-                    vars[idx] = np.eye(128)
-                else:
-                    mean_cat = np.stack(means[idx], 0)
-                    mean_est = np.mean(mean_cat, axis=0, keepdims=True)  # size 1*embed_dim
-                    mean_cat = mean_cat - mean_est
-                    n = mean_cat.shape[0]
-                    d = mean_cat.shape[1]
-                    cov_est = np.zeros((d, d))
-                    for i in range(n):
-                        x = mean_cat[i]
-                        cov_est += 1.0 / (n - 1.0) * np.outer(x, x)
-                    mean_est = mean_est[0]
-                    means[idx] = mean_est
-                    vars[idx] = cov_est
-            return means, vars
-        else:
-            mean_est = torch.mean(mean_cat, dim=0, keepdim=True)  # size 1*embed_dim
-            mean_cat = mean_cat - mean_est
-            cov_est_ = np.cov(mean_cat.numpy().T)
-            n = mean_cat.size(0)
-            d = mean_cat.size(1)
-            cov_est = np.zeros((d, d))
-            for i in range(n):
-                x = mean_cat[i].numpy()
-                cov_est += 1.0 / (n - 1.0) * np.outer(x, x)
-            mean_est = mean_est[0]
+        mean_est = torch.mean(mean_cat, dim=0, keepdim=True)  # size 1*embed_dim
+        mean_cat = mean_cat - mean_est
+        cov_est_ = np.cov(mean_cat.numpy().T)
+        n = mean_cat.size(0)
+        d = mean_cat.size(1)
+        cov_est = np.zeros((d, d))
+        for i in range(n):
+            x = mean_cat[i].numpy()
+            cov_est += 1.0 / (n - 1.0) * np.outer(x, x)
+        mean_est = mean_est[0]
 
-            return mean_est, cov_est_
+        return mean_est, cov_est_
 
-
-class VAE(nn.Module):
-
-    def __init__(self, type='dis', vocab=None, replace_latent=False, with_changes=True, distribution_before=True,
-                 residual=False, gconv_pooling='avg', with_angles=False, num_box_params=6):
-        super().__init__()
-        assert type in ['dis', 'sln', 'shared', 'mlp'], '{} is not included in [dis, sln, shared, mlp]'.format(type)
-
-        self.type_ = type
-        self.vocab = vocab
-        self.with_angles = with_angles
-
-        if self.type_ == 'dis':
-            assert replace_latent is not None
-            self.vae_box = SGVAE(vocab, embedding_dim=64, decoder_cat=True, mlp_normalization="batch",
-                               input_dim=num_box_params, replace_latent=replace_latent, use_angles=with_angles,
-                               residual=residual, gconv_pooling=gconv_pooling, gconv_num_layers=5)
-            self.vae_shape = SGVAE(vocab, embedding_dim=128, decoder_cat=True, mlp_normalization="batch",
-                                 input_dim=128, gconv_num_layers=5
-                                 , replace_latent=replace_latent,
-                                 residual=residual, gconv_pooling=gconv_pooling, use_angles=False)
-
-    def forward_no_mani(self, objs, triples, boxes, shapes, angles=None, attributes=None):
-
-        (mu_boxes, logvar_boxes), (mu_shapes, logvar_shapes) = self.encode_box_and_shape(objs, triples, shapes, boxes,
-                                                                                angles=angles, attributes=attributes)
-        # reparameterization
-        std_box = torch.exp(0.5 * logvar_boxes)
-        # standard sampling
-        eps_box = torch.randn_like(std_box)
-
-        z_boxes = eps_box.mul(std_box).add_(mu_boxes)
-        z_shapes = None
-        if mu_shapes is not None:
-            std_shapes = torch.exp(0.5 * logvar_shapes)
-            eps_shapes = torch.randn_like(std_shapes)
-            z_shapes = eps_shapes.mul(std_shapes).add_(mu_shapes)
-
-        boxes, angles, shapes = self.decoder_boxes_and_shape(z_boxes, z_shapes, objs, triples, attributes, None)
-        return mu_boxes, logvar_boxes, mu_shapes, logvar_shapes, boxes, angles, shapes
-
-    def load_networks(self, exp, epoch, strict=True):
-        if self.type_ == 'dis':
-            self.vae_box.load_state_dict(
-                torch.load(os.path.join(exp, 'checkpoint', 'model_box_{}.pth'.format(epoch))),
-                strict=strict
-            )
-            self.vae_shape.load_state_dict(
-                torch.load(os.path.join(exp, 'checkpoint', 'model_shape_{}.pth'.format(epoch))),
-                strict=strict
-            )
-
-    def compute_statistics(self, exp, epoch, stats_dataloader, force=False):
-        box_stats_f = os.path.join(exp, 'checkpoint', 'model_stats_box_{}.pkl'.format(epoch))
-        shape_stats_f = os.path.join(exp, 'checkpoint', 'model_stats_shape_{}.pkl'.format(epoch))
-
-        if self.type_ == 'dis':
-            if os.path.exists(box_stats_f) and not force:
-                stats = pickle.load(open(box_stats_f, 'rb'))
-                self.mean_est_box, self.cov_est_box = stats[0], stats[1]
-            else:
-                self.mean_est_box, self.cov_est_box = self.vae_box.collect_train_statistics(stats_dataloader)
-                pickle.dump([self.mean_est_box, self.cov_est_box], open(box_stats_f, 'wb'))
-
-            if os.path.exists(shape_stats_f) and not force:
-                stats = pickle.load(open(shape_stats_f, 'rb'))
-                self.mean_est_shape, self.cov_est_shape = stats[0], stats[1]
-            else:
-                self.mean_est_shape, self.cov_est_shape = self.vae_shape.collect_train_statistics(stats_dataloader,
-                                                                                                 with_points=True)
-                pickle.dump([self.mean_est_shape, self.cov_est_shape], open(shape_stats_f, 'wb'))
-
-    def decoder_boxes_and_shape(self, z_box, z_shape, objs, triples, attributes, atlas=None):
-        angles = None
-        if self.type_ == 'dis':
-            boxes, angles = self.decoder_boxes(z_box, objs, triples, attributes)
-            points = self.decoder_shape(z_shape, objs, triples, attributes, atlas)
-
-        return boxes, angles, points
-
-    def decoder_boxes(self, z, objs, triples, attributes):
-        if self.type_ == 'dis':
-            if self.with_angles:
-                return self.vae_box.decoder(z, objs, triples, attributes)
-            else:
-                return self.vae_box.decoder(z, objs, triples, attributes), None
-
-    def decoder_shape(self, z, objs, triples, attributes, atlas=None):
-        #print(self.type_)
-        if self.type_ == 'dis':
-            feats = self.vae_shape.decoder(z, objs, triples, attributes)
-        return atlas.forward_inference_from_latent_space(feats, atlas.get_grid()) if atlas is not None else feats
-
-    def encode_box_and_shape(self, objs, triples, feats, boxes, angles=None, attributes=None):
-        if not self.with_angles:
-            angles = None
-        if self.type_ == 'dis':
-            return self.encode_box(objs, triples, boxes, angles, attributes), \
-                   self.encode_shape(objs, triples, feats, attributes)
-
-    def encode_shape(self, objs, triples, feats, attributes=None):
-        if self.type_ == 'dis':
-            z, log_var = self.vae_shape.encoder(objs, triples, feats, attributes)
-        return z, log_var
-
-    def encode_box(self, objs, triples, boxes, angles=None, attributes=None):
-        if self.type_ == 'dis':
-            z, log_var = self.vae_box.encoder(objs, triples, boxes, attributes, angles)
-        return z, log_var
-
-    def sample_box_and_shape(self, point_classes_idx, point_ae, dec_objs, dec_triplets, attributes=None):
-        boxes = self.sample_box(dec_objs, dec_triplets, attributes)
-        shapes = self.sample_shape(point_classes_idx, dec_objs, point_ae, dec_triplets, attributes)
-        return boxes, shapes
-
-    def sample_box(self, dec_objs, dec_triplets, attributes=None):
-        if self.type_ == 'dis':
-            return self.vae_box.sampleBoxes(self.mean_est_box, self.cov_est_box, dec_objs, dec_triplets, attributes)
-
-    def sample_shape(self, point_classes_idx, dec_objs, point_ae, dec_triplets, attributes=None):
-        if self.type_ == 'dis':
-            return self.vae_shape.sampleShape(point_classes_idx, point_ae, self.mean_est_shape, self.cov_est_shape,
-                                              dec_objs, dec_triplets, attributes)
-
-    def save(self, exp, outf, epoch):
-        if self.type_ == 'dis':
-            torch.save(self.vae_box.state_dict(), os.path.join(exp, outf, 'model_box_{}.pth'.format(epoch)))
-            torch.save(self.vae_shape.state_dict(), os.path.join(exp, outf, 'model_shape_{}.pth'.format(epoch)))
 
 #============================================================
 # PyTorch modules for dealing with scene graphs
@@ -460,6 +272,7 @@ class VAE(nn.Module):
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 
 def make_mlp(dim_list, activation='relu', batch_norm='none', dropout=0, norelu=False):
   return build_mlp(dim_list, activation, batch_norm, dropout, final_nonlinearity=(not norelu))
@@ -529,7 +342,7 @@ class GraphTripleConv(nn.Module):
     """
     def __init__(self, input_dim_obj, input_dim_pred, output_dim=None, hidden_dim=512,
                              pooling='avg', mlp_normalization='none', residual=True):
-        super(GraphTripleConv, self).__init__()
+        super().__init__()
         if output_dim is None:
             output_dim = input_dim_obj
         self.input_dim_obj = input_dim_obj
@@ -653,7 +466,7 @@ class GraphTripleConvNet(nn.Module):
     def __init__(self, input_dim_obj, input_dim_pred, num_layers=2, hidden_dim=512,
                              residual=False, pooling='avg',
                              mlp_normalization='none', output_dim=None):
-        super(GraphTripleConvNet, self).__init__()
+        super().__init__()
 
         self.num_layers = num_layers
         self.gconvs = nn.ModuleList()
@@ -697,6 +510,8 @@ def build_mlp(dim_list, activation='relu', batch_norm='none',
     if not final_layer or final_nonlinearity:
       if batch_norm == 'batch':
         layers.append(nn.BatchNorm1d(dim_out))
+      elif batch_norm == 'layer':
+        layers.append(nn.LayerNorm(dim_out))
       if activation == 'relu':
         layers.append(nn.ReLU())
       elif activation == 'leakyrelu':

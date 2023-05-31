@@ -1,0 +1,12 @@
+python train_scenegraphvae.py \
+--debug False \
+--data_dir "/root/hdd1/G2S/SceneGraphData" \
+--name "G2S_SGVAE_practice_230531_256_True" \
+--exps_dir "/root/hdd1/G2S/practice" \
+--gpu_ids "0" --verbose True \
+--num_epochs 100 --save_freq 20 \
+--train_batch_size 32 --lr 0.0001 --num_threads 8 \
+--use_wandb True --wandb_entity 'ray_park' --wandb_project_name 'G2S' \
+--visualize False \
+--use_randomseed False \
+--gconv_dim 256 --residual True
