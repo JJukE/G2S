@@ -96,7 +96,7 @@ class SceneGraphDataset(Dataset):
             self.box_json_file = os.path.join(self.sgdata_dir, 'obj_boxes_train_refined.json')
             self.floor_json_file = os.path.join(self.sgdata_dir, 'floor_boxes_split_train.json')
         elif split == 'test': # test set
-            splits_fname = 'relationships_test_clean' if self.use_scene_splits else 'relationships_merged_train_clean'
+            splits_fname = 'relationships_test_clean' if self.use_scene_splits else 'relationships_merged_test_clean'
             self.rel_json_file = os.path.join(self.sgdata_dir, '{}.json'.format(splits_fname))
             self.box_json_file = os.path.join(self.sgdata_dir, 'obj_boxes_test_refined.json')
             self.floor_json_file = os.path.join(self.sgdata_dir, 'floor_boxes_split_test.json')
@@ -424,7 +424,10 @@ def collate_fn_sgvae(batch):
                 'triples': all_triples,
                 'boxes': all_boxes,
                 'obj_to_scene': all_obj_to_scene,
-                'tiple_to_scene': all_triple_to_scene}
+                'triple_to_scene': all_triple_to_scene,
+                'scan_id': out['scan_id'][0],
+                'instance_id': out['instance_id'][0],
+                'split_id': out['split_id'][0]}
 
     out = outputs
 

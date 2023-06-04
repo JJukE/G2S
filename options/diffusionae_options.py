@@ -36,8 +36,6 @@ class DiffusionAETrainOptions(TrainOptions):
 
         # Training
         parser.add_argument('--num_val_batches', type=int, default=-1)
-        parser.add_argument('--num_inspect_batches', type=int, default=1)
-        parser.add_argument('--num_inspect_pointclouds', type=int, default=4)
         
         return parser
 

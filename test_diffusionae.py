@@ -8,14 +8,13 @@ import torch.multiprocessing as mp
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from data.dpmpc_dataset import ShapeNetCore
+from data.dpmpc_dataset import ShapeNetDataset
 from models.diffusionae import DiffusionAE
 from utils.util import seed_all, CheckpointManager
 
 from options.diffusionae_options import DiffusionAETestOptions
 from jjuke.logger import CustomLogger
 from jjuke.metrics import EMD_CD
-
 from utils.visualizer import ObjectVisualizer
 
 os.environ["OMP_NUM_THREADS"] = str(min(16, mp.cpu_count()))
@@ -25,9 +24,8 @@ os.environ["OMP_NUM_THREADS"] = str(min(16, mp.cpu_count()))
 #============================================================
 
 @torch.no_grad()
-def eval(model, test_loader, args, ckpt_args, res_dir):
-    if args.visualize:
-        visualizer = ObjectVisualizer()
+def evaluate(model, test_loader, args, ckpt_args, res_dir):
+    model.eval()
     
     all_ref = []
     all_recons = []
@@ -37,7 +35,6 @@ def eval(model, test_loader, args, ckpt_args, res_dir):
         shift = batch['shift'].to(args.device)
         scale = batch['scale'].to(args.device)
         label = batch['cate']
-        model.eval()
         
         code = model.encode(ref) # (B, z_dim)
         recons = model.decode(code, flexibility=ckpt_args.flexibility) # (B, num_points, 3)
@@ -54,13 +51,15 @@ def eval(model, test_loader, args, ckpt_args, res_dir):
     all_labels = np.concatenate(all_labels, axis=0) # (num_all_objects)
     
     if args.visualize:
+        visualizer = ObjectVisualizer()
+        
         logger.info('Saving point clouds...')
         ref_to_save = all_ref[:args.num_vis]
         recon_to_save = all_recons[:args.num_vis]
         label_to_save = all_labels[:args.num_vis]
         
-        visualizer.save(ref_to_save, os.path.join(res_dir, "references.ply"))
-        visualizer.save(recon_to_save, os.path.join(res_dir, "recons.ply"))
+        visualizer.save(os.path.join(res_dir, "references.ply"), ref_to_save)
+        visualizer.save(os.path.join(res_dir, "recons.ply"), recon_to_save)
         np.save(os.path.join(res_dir, "labels.npy"), label_to_save)
     
     logger.info('Computing metrics...')
@@ -98,9 +97,10 @@ if __name__ == '__main__':
     args, arg_msg, device_msg = DiffusionAETestOptions().parse()
 
     if args.debug:
-        args.data_dir = '/root/hdd1/DPMPC'
+        args.data_dir = '/root/hdd1/G2S'
+        args.data_name = '3rlabel_shapenetdata.hdf5'
         args.name = 'G2S_DPMPC_practice_230527'
-        args.gpu_ids = '0'
+        args.gpu_ids = '0' # only 0 is available while debugging
         args.exps_dir = '/root/hdd1/G2S/practice'
         args.ckpt_name = 'ckpt_100000.pt'
         args.test_batch_size = 128
@@ -122,12 +122,13 @@ if __name__ == '__main__':
     # set seed
     if not args.use_randomseed:
         args.seed = random.randint(1, 10000)
+    logger.info("Seed: {}".format(args.seed))
     seed_all(args.seed)
 
     # Datasets and loaders
     logger.info('Loading datasets...')
-    dataset_path = os.path.join(args.data_dir, 'shapenet.hdf5')
-    test_dataset = ShapeNetCore(
+    dataset_path = os.path.join(args.data_dir, args.data_name)
+    test_dataset = ShapeNetDataset(
         path=dataset_path,
         cates=args.categories,
         split='test',
@@ -147,7 +148,7 @@ if __name__ == '__main__':
     # Main loop
     logger.info('Start evaluation...')
     try:
-        eval(model, test_loader, args, ckpt_args=ckpt['args'], res_dir=res_dir)
+        evaluate(model, test_loader, args, ckpt_args=ckpt['args'], res_dir=res_dir)
 
     except KeyboardInterrupt:
         logger.info('Terminating...')

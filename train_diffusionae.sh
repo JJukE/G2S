@@ -1,0 +1,13 @@
+python train_diffusionae.py \
+--debug False \
+--data_dir "/root/hdd1/G2S/NewData/Mixed" \
+--data_name "3rlabel_shapenetdata.hdf5" \
+--name "G2S_DPMPC_230603" \
+--gpu_ids "1" \
+--exps_dir "/root/hdd1/G2S/exps" \
+--train_batch_size 128 \
+--latent_dim 128 \
+--use_wandb True --visualize True \
+--use_randomseed True \
+--val_freq 5000 \
+--max_iters 200000

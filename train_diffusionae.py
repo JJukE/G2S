@@ -12,7 +12,7 @@ from torch.utils.data.distributed import DistributedSampler
 from torch.nn.utils import clip_grad_norm_
 from tqdm import tqdm
 
-from data.dpmpc_dataset import ShapeNetCore
+from data.dpmpc_dataset import ShapeNetDataset
 from models.diffusionae import DiffusionAE
 from models.dpmpc import get_linear_scheduler
 from utils.util import seed_all, CheckpointManager, print_model, get_data_iterator
@@ -53,22 +53,35 @@ def train(iter):
     if iter % 1000 == 0:
         logger.info('[Train] Iter {:04d} | Loss {:.6f} | Grad {:.4f} '.format(it, loss.item(), orig_grad_norm))
 
-def validate_loss(iter):
-
+@torch.no_grad()
+def validate(iter, vis_dir):
+    model.eval()
+    
     all_refs = []
     all_recons = []
+    all_labels = []
+    
     for i, batch in enumerate(tqdm(val_loader, desc='Validate')):
         if args.num_val_batches > 0 and i >= args.num_val_batches:
             break
         ref = batch['pointcloud'].to(args.device)
         shift = batch['shift'].to(args.device)
         scale = batch['scale'].to(args.device)
-        with torch.no_grad():
-            model.eval()
-            code = model.encode(ref)
-            recons = model.decode(code, flexibility=args.flexibility)
+        label = batch['cate']
+        
+        code = model.encode(ref)
+        recons = model.decode(code, flexibility=args.flexibility)
+        
         all_refs.append(ref * scale + shift)
         all_recons.append(recons * scale + shift)
+        all_labels.append(label)
+
+    if args.visualize:
+        logger.info('Saving point clouds...')
+        visualizer = ObjectVisualizer()
+        visualizer.save(os.path.join(vis_dir, "references.ply"), all_refs)
+        visualizer.save(os.path.join(vis_dir, "recons.ply"), all_recons)
+        np.save(os.path.join(vis_dir, "labels.npy"), all_labels)
 
     all_refs = torch.cat(all_refs, dim=0)
     all_recons = torch.cat(all_recons, dim=0)
@@ -81,27 +94,6 @@ def validate_loss(iter):
 
     return cd
 
-
-def validate_inspect(iter):
-    visualizer = ObjectVisualizer()
-    sum_n = 0
-    sum_chamfer = 0
-    for i, batch in enumerate(tqdm(val_loader, desc='Inspect')):
-        x = batch['pointcloud'].to(args.device)
-        if i == 0:
-            logger.info('refence category: {} in {}th iteration'.format(batch['cate'][i], iter))
-        model.eval()
-        code = model.encode(x)
-        recons = model.decode(code, flexibility=args.flexibility).detach()
-
-        sum_n += x.size(0)
-        if i >= args.num_inspect_batches:
-            break   # Inspect only 5 batch
-    
-    arr_pc = recons.cpu().detach().numpy().reshape(-1,3) # only visualize the first batch(first category)
-
-    visualizer.visualize(arr_pc)
-
 #============================================================
 # Main
 #============================================================
@@ -111,18 +103,26 @@ if __name__ == '__main__':
     args, arg_msg, device_msg = DiffusionAETrainOptions().parse()
 
     if args.debug:
-        args.data_dir = '/root/hdd1/DPMPC'
-        args.name = 'G2S_DPMPC_practice_230527'
-        args.gpu_ids = '0'
-        args.exps_dir = '/root/hdd1/G2S/practice'
+        args.data_dir = '/root/hdd1/G2S/NewData/Mixed'
+        args.data_name = '3rlabel_shapenetdata.hdf5'
+        args.name = 'G2S_DPMPC_230603'
+        args.gpu_ids = '0' # only 0 is available while debugging
+        args.exps_dir = '/root/hdd1/G2S/exps'
         args.train_batch_size = 128
+        args.latent_dim = 128
+        
         args.use_wandb = True
         args.wandb_entity = 'ray_park'
         args.wandb_project_name = 'G2S'
-        args.visualize = False
+        args.visualize = True
+        
+        args.use_randomseed = True
+        args.val_freq = 5000
+        args.max_iters = 200000
 
     # get logger and checkpoint manager
     exp_dir = os.path.join(args.exps_dir, args.name, "ckpts")
+    vis_dir = os.path.join(args.exps_dir, args.name, "validation")
     logger = CustomLogger(exp_dir, isTrain=args.isTrain)
     ckpt_mgr = CheckpointManager(exp_dir, isTrain=args.isTrain, logger=logger)
     logger.info(arg_msg)
@@ -150,15 +150,15 @@ if __name__ == '__main__':
     logger.info("Loading datasets...")
 
     # dataloaders
-    dataset_path = os.path.join(args.data_dir, "shapenet.hdf5")
-    train_dataset = ShapeNetCore(
+    dataset_path = os.path.join(args.data_dir, args.data_name)
+    train_dataset = ShapeNetDataset(
         path=dataset_path,
         cates=args.categories,
         split='train',
         scale_mode=args.scale_mode,
         transform=transform,
     )
-    val_dataset = ShapeNetCore(
+    val_dataset = ShapeNetDataset(
         path=dataset_path,
         cates=args.categories,
         split='val',
@@ -217,12 +217,7 @@ if __name__ == '__main__':
             
             # Validation
             if it % args.val_freq == 0 or it == args.max_iters:
-                with torch.no_grad():
-                    cd_loss = validate_loss(it)
-                    
-                    if args.visualize:
-                        validate_inspect(it)
-                        logger.info("Continue training...")
+                cd_loss = validate(it, vis_dir=vis_dir)
 
                 opt_states = {
                     'optimizer': optimizer.state_dict(),

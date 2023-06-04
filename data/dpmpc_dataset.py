@@ -1,5 +1,6 @@
 import os
 import random
+import json
 from copy import copy
 
 import numpy as np
@@ -8,44 +9,54 @@ from torch.utils.data import Dataset
 import h5py
 from tqdm import tqdm
 
+# # original (ShapeNet)
+# synsetid_to_cate = {
+#     '02691156': 'airplane', '02773838': 'bag', '02801938': 'basket',
+#     '02808440': 'bathtub', '02818832': 'bed', '02828884': 'bench',
+#     '02876657': 'bottle', '02880940': 'bowl', '02924116': 'bus',
+#     '02933112': 'cabinet', '02747177': 'can', '02942699': 'camera',
+#     '02954340': 'cap', '02958343': 'car', '03001627': 'chair',
+#     '03046257': 'clock', '03207941': 'dishwasher', '03211117': 'monitor',
+#     '04379243': 'table', '04401088': 'telephone', '02946921': 'tin_can',
+#     '04460130': 'tower', '04468005': 'train', '03085013': 'keyboard',
+#     '03261776': 'earphone', '03325088': 'faucet', '03337140': 'file',
+#     '03467517': 'guitar', '03513137': 'helmet', '03593526': 'jar',
+#     '03624134': 'knife', '03636649': 'lamp', '03642806': 'laptop',
+#     '03691459': 'speaker', '03710193': 'mailbox', '03759954': 'microphone',
+#     '03761084': 'microwave', '03790512': 'motorcycle', '03797390': 'mug',
+#     '03928116': 'piano', '03938244': 'pillow', '03948459': 'pistol',
+#     '03991062': 'pot', '04004475': 'printer', '04074963': 'remote_control',
+#     '04090263': 'rifle', '04099429': 'rocket', '04225987': 'skateboard',
+#     '04256520': 'sofa', '04330267': 'stove', '04530566': 'vessel',
+#     '04554684': 'washer', '02992529': 'cellphone',
+#     '02843684': 'birdhouse', '02871439': 'bookshelf',
+#     # '02858304': 'boat', no boat in our dataset, merged into vessels
+#     # '02834778': 'bicycle', not in our taxonomy
+# }
 
-synsetid_to_cate = {
-    '02691156': 'airplane', '02773838': 'bag', '02801938': 'basket',
-    '02808440': 'bathtub', '02818832': 'bed', '02828884': 'bench',
-    '02876657': 'bottle', '02880940': 'bowl', '02924116': 'bus',
-    '02933112': 'cabinet', '02747177': 'can', '02942699': 'camera',
-    '02954340': 'cap', '02958343': 'car', '03001627': 'chair',
-    '03046257': 'clock', '03207941': 'dishwasher', '03211117': 'monitor',
-    '04379243': 'table', '04401088': 'telephone', '02946921': 'tin_can',
-    '04460130': 'tower', '04468005': 'train', '03085013': 'keyboard',
-    '03261776': 'earphone', '03325088': 'faucet', '03337140': 'file',
-    '03467517': 'guitar', '03513137': 'helmet', '03593526': 'jar',
-    '03624134': 'knife', '03636649': 'lamp', '03642806': 'laptop',
-    '03691459': 'speaker', '03710193': 'mailbox', '03759954': 'microphone',
-    '03761084': 'microwave', '03790512': 'motorcycle', '03797390': 'mug',
-    '03928116': 'piano', '03938244': 'pillow', '03948459': 'pistol',
-    '03991062': 'pot', '04004475': 'printer', '04074963': 'remote_control',
-    '04090263': 'rifle', '04099429': 'rocket', '04225987': 'skateboard',
-    '04256520': 'sofa', '04330267': 'stove', '04530566': 'vessel',
-    '04554684': 'washer', '02992529': 'cellphone',
-    '02843684': 'birdhouse', '02871439': 'bookshelf',
-    # '02858304': 'boat', no boat in our dataset, merged into vessels
-    # '02834778': 'bicycle', not in our taxonomy
-}
-synsetid_to_cate_overlapped_with_3rscan = { # 22 out of 55 objects overlapped with 3RScan
-    '02773838': 'bag', '02801938': 'basket', '02808440': 'bathtub',
-    '02818832': 'bed', '02828884': 'bench', '02876657': 'bottle',
-    '02933112': 'cabinet', '03001627': 'chair', '03046257': 'clock',
-    '03211117': 'monitor', '04379243': 'table', '04401088': 'telephone',
-    '03593526': 'jar', '03636649': 'lamp', '03642806': 'laptop',
-    '03761084': 'microwave', '03938244': 'pillow', '03991062': 'pot',
-    '04004475': 'printer', '04256520': 'sofa', '04330267': 'stove',
-    '02871439': 'bookshelf'
-}
-cate_to_synsetid = {v: k for k, v in synsetid_to_cate_overlapped_with_3rscan.items()}
+# overlapped with 3rscan
+# synsetid_to_cate_overlapped_with_3rscan = { # 22 out of 55 objects overlapped with 3RScan
+#     '02773838': 'bag', '02801938': 'basket', '02808440': 'bathtub',
+#     '02818832': 'bed', '02828884': 'bench', '02876657': 'bottle',
+#     '02933112': 'cabinet', '03001627': 'chair', '03046257': 'clock',
+#     '03211117': 'monitor', '04379243': 'table', '04401088': 'telephone',
+#     '03593526': 'jar', '03636649': 'lamp', '03642806': 'laptop',
+#     '03761084': 'microwave', '03938244': 'pillow', '03991062': 'pot',
+#     '04004475': 'printer', '04256520': 'sofa', '04330267': 'stove',
+#     '02871439': 'bookshelf'
+# }
+# synsetid_to_cate = synsetid_to_cate_overlapped_with_3rscan
+# cate_to_synsetid = {v: k for k, v in synsetid_to_cate_overlapped_with_3rscan.items()}
+
+# mixed with 3rscan
+with open("/root/hdd1/G2S/NewData/Mixed/id_to_cate.json", "r") as read_file:
+    synsetid_to_cate_mixed_with_3rscan = json.load(read_file)
+
+synsetid_to_cate = synsetid_to_cate_mixed_with_3rscan
+cate_to_synsetid = {v: k for k, v in synsetid_to_cate_mixed_with_3rscan.items()}
 
 
-class ShapeNetCore(Dataset):
+class ShapeNetDataset(Dataset):
 
     GRAVITATIONAL_AXIS = 1
     
@@ -88,7 +99,10 @@ class ShapeNetCore(Dataset):
             pointclouds = []
             for synsetid in self.cate_synsetids:
                 for split in ('train', 'val', 'test'):
-                    pointclouds.append(torch.from_numpy(f[synsetid][split][...]))
+                    object_pcs = f[synsetid][split][...]
+                    if object_pcs.ndim == 2:
+                        object_pcs = np.expand_dims(object_pcs, axis=0)
+                    pointclouds.append(torch.from_numpy(object_pcs))
 
         all_points = torch.cat(pointclouds, dim=0) # (B, N, 3)
         B, N, _ = all_points.size()
@@ -105,15 +119,22 @@ class ShapeNetCore(Dataset):
             for synsetid in self.cate_synsetids:
                 cate_name = synsetid_to_cate[synsetid]
                 for j, pc in enumerate(f[synsetid][self.split]):
+                    if pc.ndim == 1:
+                        print(pc.shape)
+                        print(synsetid)
+                        print(self.split)
                     yield torch.from_numpy(pc), j, cate_name
         
         with h5py.File(self.path, mode='r') as f:
             for pc, pc_id, cate_name in _enumerate_pointclouds(f):
+                if pc.ndim == 1:
+                    pc = pc.unsqueeze(0)
 
                 if self.scale_mode == 'global_unit':
                     shift = pc.mean(dim=0).reshape(1, 3)
                     scale = self.stats['std'].reshape(1, 1)
                 elif self.scale_mode == 'shape_unit':
+                    print(pc.shape)
                     shift = pc.mean(dim=0).reshape(1, 3)
                     scale = pc.flatten().std().reshape(1, 1)
                 elif self.scale_mode == 'shape_half':
@@ -149,7 +170,7 @@ class ShapeNetCore(Dataset):
         return len(self.pointclouds)
 
     def __getitem__(self, idx):
-        data = {k:v.clone() if isinstance(v, torch.Tensor) else copy(v) for k, v in self.pointclouds[idx].items()}
+        data = {k:v.clone().type(torch.FloatTensor) if isinstance(v, torch.Tensor) else copy(v) for k, v in self.pointclouds[idx].items()}
         if self.transform is not None:
             data = self.transform(data)
         return data

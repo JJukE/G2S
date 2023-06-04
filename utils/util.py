@@ -132,7 +132,7 @@ class CheckpointManager(object):
         return ckpt
 
 #============================================================
-# for setting seeds (torch, numpy, python)
+# seed setting (torch, numpy, python)
 #============================================================
 
 def seed_all(seed):

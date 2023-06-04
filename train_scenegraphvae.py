@@ -17,12 +17,9 @@ from tqdm import tqdm
 
 from data.sg_dataset import SceneGraphDataset, collate_fn_sgvae
 from models.scenegraphvae import LayoutVAE
-from models.dpmpc import get_linear_scheduler
 from utils.util import seed_all, CheckpointManager, print_model
 from options.scenegraphvae_options import SGVAETrainOptions
 from jjuke.logger import CustomLogger
-from jjuke.metrics import EMD_CD
-from jjuke.pointcloud.transform import RandomRotate
 
 from utils.visualizer import SceneVisualizer
 
@@ -32,7 +29,7 @@ os.environ["OMP_NUM_THREADS"] = str(min(16, mp.cpu_count()))
 # Training and Validation
 #============================================================
 
-def train_one_epoch(args, model, train_loader, optimizer, epoch):
+def train_one_epoch(args, model, train_loader, optimizer):
     model.train()
     train_losses = {'recon_loss': [], 'angle_loss': [], 'KL_Gauss_loss': [], 'total_loss': []}
     for i, data in enumerate(tqdm(train_loader, desc='Train')):
@@ -101,7 +98,7 @@ def train_one_epoch(args, model, train_loader, optimizer, epoch):
         for group in optimizer.param_groups:
             for p in group['params']:
                 if p.grad is not None and p.requires_grad and torch.isnan(p.grad).any():
-                    logger.info("NaN grad in {}th iteration in {}th epoch.".format(i, epoch))
+                    logger.info("NaN grad in {}th iteration.".format(i))
                     p.grad[torch.isnan(p.grad)] = 0
         
         optimizer.step()
@@ -121,10 +118,7 @@ def train_one_epoch(args, model, train_loader, optimizer, epoch):
         
 
 @torch.no_grad()
-def val_one_epoch(args, model, val_loader, epoch):
-    if args.visualize:
-        visualizer = SceneVisualizer()
-
+def val_one_epoch(args, model, val_loader, res_dir, epoch):
     model.eval()
     val_losses = {'recon_loss': [], 'angle_loss': [], 'KL_Gauss_loss': [], 'total_loss': []}
     for i, data in enumerate(tqdm(val_loader, desc='Validate')):
@@ -184,8 +178,19 @@ def val_one_epoch(args, model, val_loader, epoch):
                    "[Val] KL_Gauss_loss": val_losses['KL_Gauss_loss'],
                    "[Val] total_loss": val_losses['total_loss']})
     
-    if args.visualize:
-        visualizer.visualize(boxes_pred, angles_pred)
+    if args.visualize and epoch % args.vis_freq == 0:
+        angles_pred = torch.argmax(angles_pred, dim=1, keepdim=True) * 15.0 # 24 * 15 = 360
+        # TODO: visualizer에는 angle 적용된 box points 들어가도록 수정 (범용적인 모듈로!)
+        print("number of boxes: {}".format(len(boxes)))
+        print("number of angles: {}".format(len(angles)))
+        visualizer = SceneVisualizer()
+        # visualizer.save(path=res_dir, type='bb', boxes=boxes_pred, angles=angles_pred)
+        
+        # temporarily visualize on the window
+        print("shape of boxes: {}, angles: {}".format(boxes.shape, angles.shape))
+        print("shape of boxes_pred: {}, angles_pred: {}".format(boxes_pred.shape, angles_pred.shape))
+        visualizer.visualize(type='bb', boxes=boxes, angles=angles) # GT
+        visualizer.visualize(type='bb', boxes=boxes_pred, angles=angles_pred) # pred
     
     return val_losses
 
@@ -199,8 +204,8 @@ if __name__ == '__main__':
 
     if args.debug:
         args.data_dir = '/root/hdd1/G2S/SceneGraphData'
-        args.name = 'G2S_SGVAE_practice_230531_64_False'
-        args.gpu_ids = '0'
+        args.name = 'G2S_SGVAE_practice_viz_230602_64_False'
+        args.gpu_ids = '0' # only 0 is available while debugging
         args.exps_dir = '/root/hdd1/G2S/practice'
         args.verbose = True
         
@@ -208,13 +213,13 @@ if __name__ == '__main__':
         args.train_batch_size = 32
         args.num_treads = 8
         args.lr = 0.0001
-        args.val_freq = 10
-        args.save_freq = 20
+        args.save_freq = 50
 
-        args.use_wandb = True
+        args.use_wandb = False
         args.wandb_entity = 'ray_park'
         args.wandb_project_name = 'G2S'
-        args.visualize = False
+        args.visualize = True
+        args.vis_freq = 50
         
         args.gconv_dim = 64 # TODO: 128 비교
         args.residual = False # TODO: True 비교
@@ -222,6 +227,7 @@ if __name__ == '__main__':
 
     # get logger and checkpoint manager
     exp_dir = os.path.join(args.exps_dir, args.name, "ckpts")
+    vis_dir = os.path.join(args.exps_dir, args.name, "validation")
     logger = CustomLogger(exp_dir, isTrain=args.isTrain)
     ckpt_mgr = CheckpointManager(exp_dir, isTrain=args.isTrain, logger=logger)
     logger.info(arg_msg)
@@ -276,7 +282,8 @@ if __name__ == '__main__':
     logger.info('Building model...')
     if args.continue_train:
         logger.info("Continue training from checkpoint...")
-        ckpt = torch.load(args.ckpt_path)
+        ckpt = torch.load(args.ckpt_path, map_location=args.device)
+        
         model = LayoutVAE(vocab=dataset.vocab, embedding_dim=args.gconv_dim,
                           residual=args.residual, gconv_pooling=args.pooling).to(args.device)
         model.load_state_dict(ckpt['state_dict'])
@@ -298,11 +305,11 @@ if __name__ == '__main__':
     try:
         for epoch in range(1, args.num_epochs + 1):
             epoch_start_time = time.time()
-            train_loss = train_one_epoch(args, model, train_loader, optimizer, epoch)
+            train_loss = train_one_epoch(args, model, train_loader, optimizer)
             logger.info('[Train] Epoch {}/{} | Loss {:.6f} | Time {:.4f} sec'.format(epoch,
                 args.num_epochs, train_loss['total_loss'], time.time() - epoch_start_time))
             
-            val_loss = val_one_epoch(args, model, val_loader, epoch)
+            val_loss = val_one_epoch(args, model, val_loader, res_dir=vis_dir, epoch=epoch)
             logger.info('[Val] Loss {:.6f}'.format(val_loss['total_loss']))
             
             if epoch % args.save_freq == 0:

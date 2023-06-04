@@ -23,6 +23,7 @@ class BaseOptions():
         
         # basic parameters # TODO: DDP 추가, debug 모드 추가
         parser.add_argument('--data_dir', type=str, default='./dataset', help='path or directory to dataset')
+        parser.add_argument('--data_name', type=str, default='datafile', help='filename of the dataset')
         parser.add_argument('--name', type=str, default='experiment_name', help='name of the experiment. It decides where to store samples and models')
         parser.add_argument('--gpu_ids', type=str, default='0', help='gpu ids: e.g. 0  0,1,2, 0,2. use -1 for CPU')
         parser.add_argument('--exps_dir', type=str, default='./exps', help='models and logs are saved here')
@@ -85,7 +86,6 @@ class BaseOptions():
         
         self.parser = parser
         args = parser.parse_args()
-        print("args.debug: ", args.debug)
 
         # set gpu ids
         str_ids = args.gpu_ids.split(',')
@@ -120,6 +120,7 @@ class TrainOptions(BaseOptions):
 
         # network saving and loading parameters
         parser.add_argument('--val_freq', type=int, default=10, help='frequency of validation when training by iteration')
+        parser.add_argument('--vis_freq', type=int, default=10, help='frequency of visualization in validation')
         parser.add_argument('--save_freq', type=int, default=20, help='frequency of saving model.')
         parser.add_argument('--save_by_iter', type=str2bool, default=False, help='whether saves model by iteration')
         parser.add_argument('--continue_train', type=str2bool, default=False, help='continue training: load the latest model')

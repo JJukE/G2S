@@ -41,11 +41,10 @@ class LayoutVAE(nn.Module):
             self.mean_est_box, self.cov_est_box = self.vae_box.collect_train_statistics(stats_dataloader)
             pickle.dump([self.mean_est_box, self.cov_est_box], open(box_stats_f, 'wb'))
 
-    def sample_box(self, dec_objs, dec_triplets, attributes=None):
-        return self.vae_box.sampleBoxes(self.mean_est_box, self.cov_est_box, dec_objs, dec_triplets, attributes)
-
-    # def save(self, exp, outf, epoch):
-    #     torch.save(self.vae_box.state_dict(), os.path.join(exp, outf, 'model_box_{}.pth'.format(epoch)))
+    @torch.no_grad()
+    def sample_box(self, mean_est, cov_est, objs, triplets, attributes=None):
+        z = torch.from_numpy(np.random.multivariate_normal(mean_est, cov_est, objs.size(0))).float().cuda()
+        return self.vae_box.decoder(z, objs, triplets, attributes)
 
 
 class SceneGraphVAE(nn.Module):
@@ -198,10 +197,9 @@ class SceneGraphVAE(nn.Module):
         return mu, logvar, pred
 
     @torch.no_grad()
-    def sampleBoxes(self, mean_est, cov_est, dec_objs, dec_triplets, attributes=None):
-        z = torch.from_numpy(np.random.multivariate_normal(mean_est, cov_est, dec_objs.size(0))).float().cuda()
-
-        return self.decoder(z, dec_objs, dec_triplets, attributes)
+    def sampleBoxes(self, mean_est, cov_est, objs, triplets, attributes=None):
+        z = torch.from_numpy(np.random.multivariate_normal(mean_est, cov_est, objs.size(0))).float().cuda()
+        return self.decoder(z, objs, triplets, attributes)
 
     # TODO: 정확히 어떻게 쓰이는지 training code 짠 후 확인
     def collect_train_statistics(self, train_loader):
