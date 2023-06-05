@@ -49,19 +49,12 @@ cate_to_id = {v: k for k, v in id_to_cate_overlapped_with_3rscan.items()}
 
 
 class SceneGraphDataset(Dataset):
-    def __init__(self, args, data_dir, categories, use_seed=True, split='train'):
+    def __init__(self, args, data_dir, categories, split='train'):
         
         # dataset arguments
         self.args = args
         self.data_dir = data_dir
         args.center_scene_to_floor
-        
-        if eval and use_seed:
-            if args.use_randomseed:
-                self.seed = args.seed
-            else:
-                self.seed = 47
-            seed_all(self.seed)
         
         self.sgdata_dir = os.path.join(self.data_dir, "Graphs")
         self.scandata_dir = os.path.join(self.data_dir, "3RScan")

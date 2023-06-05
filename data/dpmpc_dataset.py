@@ -35,25 +35,25 @@ from tqdm import tqdm
 # }
 
 # overlapped with 3rscan
-# synsetid_to_cate_overlapped_with_3rscan = { # 22 out of 55 objects overlapped with 3RScan
-#     '02773838': 'bag', '02801938': 'basket', '02808440': 'bathtub',
-#     '02818832': 'bed', '02828884': 'bench', '02876657': 'bottle',
-#     '02933112': 'cabinet', '03001627': 'chair', '03046257': 'clock',
-#     '03211117': 'monitor', '04379243': 'table', '04401088': 'telephone',
-#     '03593526': 'jar', '03636649': 'lamp', '03642806': 'laptop',
-#     '03761084': 'microwave', '03938244': 'pillow', '03991062': 'pot',
-#     '04004475': 'printer', '04256520': 'sofa', '04330267': 'stove',
-#     '02871439': 'bookshelf'
-# }
-# synsetid_to_cate = synsetid_to_cate_overlapped_with_3rscan
-# cate_to_synsetid = {v: k for k, v in synsetid_to_cate_overlapped_with_3rscan.items()}
+synsetid_to_cate_overlapped_with_3rscan = { # 22 out of 55 objects overlapped with 3RScan
+    '02773838': 'bag', '02801938': 'basket', '02808440': 'bathtub',
+    '02818832': 'bed', '02828884': 'bench', '02876657': 'bottle',
+    '02933112': 'cabinet', '03001627': 'chair', '03046257': 'clock',
+    '03211117': 'monitor', '04379243': 'table', '04401088': 'telephone',
+    '03593526': 'jar', '03636649': 'lamp', '03642806': 'laptop',
+    '03761084': 'microwave', '03938244': 'pillow', '03991062': 'pot',
+    '04004475': 'printer', '04256520': 'sofa', '04330267': 'stove',
+    '02871439': 'bookshelf'
+}
+synsetid_to_cate = synsetid_to_cate_overlapped_with_3rscan
+cate_to_synsetid = {v: k for k, v in synsetid_to_cate_overlapped_with_3rscan.items()}
 
-# mixed with 3rscan
-with open("/root/hdd1/G2S/NewData/Mixed/id_to_cate.json", "r") as read_file:
-    synsetid_to_cate_mixed_with_3rscan = json.load(read_file)
+# # mixed with 3rscan
+# with open("/root/hdd1/G2S/NewData/Mixed/id_to_cate.json", "r") as read_file:
+#     synsetid_to_cate_mixed_with_3rscan = json.load(read_file)
 
-synsetid_to_cate = synsetid_to_cate_mixed_with_3rscan
-cate_to_synsetid = {v: k for k, v in synsetid_to_cate_mixed_with_3rscan.items()}
+# synsetid_to_cate = synsetid_to_cate_mixed_with_3rscan
+# cate_to_synsetid = {v: k for k, v in synsetid_to_cate_mixed_with_3rscan.items()}
 
 
 class ShapeNetDataset(Dataset):
@@ -119,10 +119,6 @@ class ShapeNetDataset(Dataset):
             for synsetid in self.cate_synsetids:
                 cate_name = synsetid_to_cate[synsetid]
                 for j, pc in enumerate(f[synsetid][self.split]):
-                    if pc.ndim == 1:
-                        print(pc.shape)
-                        print(synsetid)
-                        print(self.split)
                     yield torch.from_numpy(pc), j, cate_name
         
         with h5py.File(self.path, mode='r') as f:
@@ -134,7 +130,6 @@ class ShapeNetDataset(Dataset):
                     shift = pc.mean(dim=0).reshape(1, 3)
                     scale = self.stats['std'].reshape(1, 1)
                 elif self.scale_mode == 'shape_unit':
-                    print(pc.shape)
                     shift = pc.mean(dim=0).reshape(1, 3)
                     scale = pc.flatten().std().reshape(1, 1)
                 elif self.scale_mode == 'shape_half':

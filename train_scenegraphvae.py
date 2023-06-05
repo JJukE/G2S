@@ -259,7 +259,6 @@ if __name__ == '__main__':
         args=args,
         data_dir=args.data_dir,
         categories=args.categories,
-        use_seed=True,
         split='train'
     )
     

@@ -10,7 +10,7 @@ from tqdm import tqdm
 
 from data.dpmpc_dataset import ShapeNetDataset
 from models.diffusionae import DiffusionAE
-from utils.util import seed_all, CheckpointManager
+from utils.util import seed_all, print_model
 
 from options.diffusionae_options import DiffusionAETestOptions
 from jjuke.logger import CustomLogger
@@ -53,7 +53,7 @@ def evaluate(model, test_loader, args, ckpt_args, res_dir):
     if args.visualize:
         visualizer = ObjectVisualizer()
         
-        logger.info('Saving point clouds...')
+        logger.info("Saving point clouds...")
         ref_to_save = all_ref[:args.num_vis]
         recon_to_save = all_recons[:args.num_vis]
         label_to_save = all_labels[:args.num_vis]
@@ -62,13 +62,13 @@ def evaluate(model, test_loader, args, ckpt_args, res_dir):
         visualizer.save(os.path.join(res_dir, "recons.ply"), recon_to_save)
         np.save(os.path.join(res_dir, "labels.npy"), label_to_save)
     
-    logger.info('Computing metrics...')
+    logger.info("Computing metrics...")
     metrics = EMD_CD(all_recons.to(args.device), all_ref.to(args.device), batch_size=args.test_batch_size)
     cd, emd = metrics['MMD-CD'].item(), metrics['MMD-EMD'].item()
     
     # if args.visualize: # visualize on the window
     #     visualizer.visualize(all_ref[:args.num_vis], num_in_row=8)
-    logger.info('[Eval] CD {:.12f} | EMD {:.12f}'.format(cd, emd))
+    logger.info("[Eval] CD {:.12f} | EMD {:.12f}".format(cd, emd))
 
 #============================================================
 # Additional Arguments
@@ -107,13 +107,12 @@ if __name__ == '__main__':
         args.use_randomseed = False
         args.visualize = True
 
-    # get logger, heckpoint manager and visualizer
+    # get logger
     exp_dir = os.path.join(args.exps_dir, args.name, "ckpts")
     ckpt_path = os.path.join(exp_dir, args.ckpt_name)
     res_dir = os.path.join(args.exps_dir, args.name, "results")
     
     logger = CustomLogger(res_dir, isTrain=args.isTrain)
-    ckpt_mgr = CheckpointManager(res_dir, isTrain=args.isTrain, logger=logger)
     
     logger.info(arg_msg)
     logger.info(device_msg)
@@ -126,7 +125,7 @@ if __name__ == '__main__':
     seed_all(args.seed)
 
     # Datasets and loaders
-    logger.info('Loading datasets...')
+    logger.info("Loading datasets...")
     dataset_path = os.path.join(args.data_dir, args.data_name)
     test_dataset = ShapeNetDataset(
         path=dataset_path,
@@ -140,18 +139,20 @@ if __name__ == '__main__':
                             num_workers=0)
 
     # Model
-    logger.info('Loading model...')
+    logger.info("Loading model...")
     ckpt = torch.load(ckpt_path, map_location=args.device)
     model = DiffusionAE(ckpt['args']).to(args.device)
     model.load_state_dict(ckpt['state_dict'])
+    
+    logger.info(print_model(model, verbose=args.verbose))
 
     # Main loop
-    logger.info('Start evaluation...')
+    logger.info("Start evaluation...")
     try:
         evaluate(model, test_loader, args, ckpt_args=ckpt['args'], res_dir=res_dir)
+        logger.info("Evaluation completed!")
+        logger.flush()
 
     except KeyboardInterrupt:
-        logger.info('Terminating...')
+        logger.info("Terminating...")
         logger.flush()
-        if args.use_wandb:
-            wandb.finish()

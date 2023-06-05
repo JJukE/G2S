@@ -174,8 +174,10 @@ def fit_shapes_to_box(box, shape, withangle=True):
         :param withangle: boolean
         :return: transformed shape
     """
-    box = box.detach().cpu().numpy()
-    shape = shape.detach().cpu().numpy()
+    if isinstance(box, torch.Tensor):
+        box = box.detach().cpu().numpy()
+    if isinstance(shape, torch.Tensor):
+        shape = shape.detach().cpu().numpy()
     if withangle:
         w, l, h, cx, cy, cz, z = box
     else:
@@ -186,7 +188,7 @@ def fit_shapes_to_box(box, shape, withangle=True):
     shape *= box[:3]
     if withangle:
         # rotate
-        shape = (get_rotation(z, degree=True).astype("float32") @ shape.T).T
+        shape = (get_rotation(z, degree=False).astype("float32") @ shape.T).T
     # translate
     shape += [cx, cy, cz]
 

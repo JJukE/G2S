@@ -16,8 +16,8 @@ from tqdm import tqdm
 from data.sg_dataset import SceneGraphDataset, collate_fn_sgvae
 from models.scenegraphvae import LayoutVAE
 from options.scenegraphvae_options import SGVAETestOptions
-from utils.util import seed_all, CheckpointManager, print_model
-from utils.viz_util import params_to_8points
+from utils.util import seed_all, print_model
+from utils.viz_util import params_to_8points, batch_torch_denormalize_box_params
 from jjuke.logger import CustomLogger
 from utils.visualizer import SceneVisualizer
 from utils.graph_visualizer import vis_graph
@@ -77,6 +77,9 @@ def evaluate(args, model, test_loader, res_dir, logger, dataset=None):
         
         boxes_pred, angles_pred = model.sample_box(mean_est, cov_est_, objs, triples) # cov_est? cov_est_?
         
+        boxes_denorm = batch_torch_denormalize_box_params(boxes)
+        boxes_pred_denorm = batch_torch_denormalize_box_params(boxes_pred)
+        
         # loss calculation
         total_loss = 0
         recon_loss = F.l1_loss(boxes_pred, boxes)
@@ -127,9 +130,9 @@ def evaluate(args, model, test_loader, res_dir, logger, dataset=None):
                 #         box_points = self.params_to_8points(box_and_angle, degrees=False)
                 #         if type == "all":
                 #             points[i] = self.fit_shapes_to_box(box_and_angle, points[i])
-                box_and_angle = torch.cat([boxes[i].float(), angles[i].float()])
+                box_and_angle = torch.cat([boxes_denorm[i].float(), angles[i].float()])
                 box_points[i] = params_to_8points(box_and_angle, degrees=False)
-                box_and_angle_pred = torch.cat([boxes_pred[i].float(), angles_pred[i].float()])
+                box_and_angle_pred = torch.cat([boxes_pred_denorm[i].float(), angles_pred[i].float()])
                 box_points_pred[i] = params_to_8points(box_and_angle_pred, degrees=False)
                 
             visualizer = SceneVisualizer()
@@ -156,7 +159,7 @@ if __name__ == '__main__':
 
     if args.debug:
         args.data_dir = '/root/hdd1/G2S/SceneGraphData'
-        args.name = 'G2S_SGVAE_practice_230531_128_True'
+        args.name = 'G2S_SGVAE_practice_230531_64_True'
         args.gpu_ids = '0' # only 0 is available while debugging
         args.exps_dir = '/root/hdd1/G2S/practice'
         args.ckpt_name = "ckpt_100.pt"
@@ -165,13 +168,12 @@ if __name__ == '__main__':
         args.test_batch_size = 1
         args.visualize = True
 
-    # get logger and checkpoint manager
+    # get logger
     exp_dir = os.path.join(args.exps_dir, args.name, "ckpts")
     ckpt_path = os.path.join(exp_dir, args.ckpt_name)
     res_dir = os.path.join(args.exps_dir, args.name, "results")
     
     logger = CustomLogger(res_dir, isTrain=args.isTrain)
-    ckpt_mgr = CheckpointManager(res_dir, isTrain=args.isTrain, logger=logger)
     
     logger.info(arg_msg)
     logger.info(device_msg)
@@ -188,7 +190,6 @@ if __name__ == '__main__':
         args=args,
         data_dir=args.data_dir,
         categories=args.categories,
-        use_seed=True,
         split='test'
     )
     
@@ -198,7 +199,7 @@ if __name__ == '__main__':
                              shuffle=False)
 
     # Model
-    logger.info('Loading model...')
+    logger.info("Loading model...")
     ckpt = torch.load(ckpt_path, map_location=args.device)
     model = LayoutVAE(vocab=test_dataset.vocab, embedding_dim=ckpt['args'].gconv_dim,
                         residual=ckpt['args'].residual, gconv_pooling=ckpt['args'].pooling).to(args.device)
@@ -212,7 +213,7 @@ if __name__ == '__main__':
         eval_start_time = time.time()
         test_loss = evaluate(args, model, test_loader, res_dir,
                              logger=logger, dataset=test_dataset)
-        logger.info('[Test] Loss {:.6f} | Time {:.4f} sec'.format(
+        logger.info("[Test] Loss {:.6f} | Time {:.4f} sec".format(
             test_loss['total_loss'], time.time() - eval_start_time))
 
         logger.info("Evaluation completed!")

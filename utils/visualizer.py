@@ -1,11 +1,7 @@
 import copy
-
-import torch
 import numpy as np
 
 import trimesh
-
-import json
 import open3d as o3d
 
 
@@ -213,7 +209,7 @@ class SceneVisualizer(BaseVisualizer):
         if type == "objects" or type == "all":
             self.num_objects = len(points)
 
-        if type == "all" and self.num_boxes != self.num_objs:
+        if type == "all" and self.num_boxes != self.num_objects:
             raise ValueError("The number of boxes and objects should be same.")
         if type != "bounding_boxes" and (points.ndim != 3 or points.shape[2] != 3):
             raise ValueError("The shape of points should be (num_objs,num_points,3), but {} is given.".format(points.shape))
@@ -326,7 +322,7 @@ class SceneVisualizer(BaseVisualizer):
         if type == "objects" or type == "all":
             self.num_objects = len(points)
 
-        if type == "all" and self.num_boxes != self.num_objs:
+        if type == "all" and self.num_boxes != self.num_objects:
             raise ValueError("The number of boxes and objects should be same.")
         if type != "bounding_boxes" and (points.ndim != 3 or points.shape[2] != 3):
             raise ValueError("The shape of points should be (num_objs,num_points,3), but {} is given.".format(points.shape))
@@ -380,6 +376,7 @@ class SceneVisualizer(BaseVisualizer):
         
         save_path_pcs = path + "_pcs.ply" # point clouds cannot be saved with meshes.
         save_path_meshes = path + "_meshes.ply"
+        save_path_boxes = path + "_boxes.ply"
         
         if type == "bounding_boxes":
             o3d.io.write_triangle_mesh(save_path_meshes, obj_and_bb)
@@ -388,6 +385,7 @@ class SceneVisualizer(BaseVisualizer):
         elif type == "all":
             if shape_type == "point_clouds":
                 o3d.io.write_point_cloud(save_path_pcs, obj_points)
+                o3d.io.write_triangle_mesh(save_path_boxes, obj_and_bb)
             elif shape_type == "meshes":
                 o3d.io.write_triangle_mesh(save_path_meshes, obj_and_bb)
             else: # TODO: voxel
