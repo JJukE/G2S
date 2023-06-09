@@ -31,6 +31,8 @@ class SGVAETrainOptions(TrainOptions):
         # Loss, optimizer and scheduler
         parser.add_argument('--max_grad_norm', type=float, default=5)
         parser.add_argument('--kl_weight', type=float, default=0.1, help='weight of KL loss term')
+        parser.add_argument('--box_weight', type=float, default=0.4, help='weight of Box reconstruction loss term')
+        parser.add_argument('--angle_weight', type=float, default=0.5, help='weight of Angle reconstruction loss term')
 
         # Training
         

@@ -166,7 +166,7 @@ if __name__ == '__main__':
         args.verbose = True
         
         args.test_batch_size = 1
-        args.visualize = True
+        args.visualize = False
 
     # get logger
     exp_dir = os.path.join(args.exps_dir, args.name, "ckpts")
@@ -197,6 +197,8 @@ if __name__ == '__main__':
                              batch_size=args.test_batch_size,
                              collate_fn=collate_fn_sgvae,
                              shuffle=False)
+    
+    logger.info("Number of test data: {}".format(len(test_loader)))
 
     # Model
     logger.info("Loading model...")

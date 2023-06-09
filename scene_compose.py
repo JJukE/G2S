@@ -93,76 +93,76 @@ def generate_scene(args, model, test_loader, res_dir, logger, shapes, num_points
         except Exception as e:
             print('Exception', str(e))
             continue
+ 
+        boxes = tight_boxes[:, :6]
+        angles = tight_boxes[:, 6].long() - 1
+        angles = torch.where(angles > 0, angles, torch.zeros_like(angles))
+        angles = torch.where(angles < 24, angles, torch.zeros_like(angles))
+        
+        boxes = boxes.to(args.device)
+        angles = angles.to(args.device)
+        
+        attributes = None
+        
+        mu, logvar = model.vae_box.encoder(objs, triples, boxes,
+                                                angles_gt=angles, attributes=attributes)
+        mu = mu.detach().cpu()
+        mean_est = torch.mean(mu, dim=0, keepdim=True)
+        mu = mu - mean_est
+        cov_est = np.cov(mu.numpy().T)
+        
+        n, d = mu.size(0), mu.size(1)
+        cov_est_ = np.zeros((d, d))
+        for i in range(n):
+            x = mu[i].numpy()
+            cov_est_ += 1.0 / (n - 1.0) * np.outer(x, x)
+        
+        mean_est = mean_est[0]
+        
+        boxes_pred, angles_pred = model.sample_box(mean_est, cov_est_, objs, triples)
+        
+        boxes_denorm = batch_torch_denormalize_box_params(boxes)
+        boxes_pred_denorm = batch_torch_denormalize_box_params(boxes_pred)
+        
+        # loss calculation
+        total_loss = 0
+        recon_loss = F.l1_loss(boxes_pred, boxes)
+        angle_loss = F.nll_loss(angles_pred, angles)
 
-        if scan == "0cac7540-8d6f-2d13-8eee-36ba2a428e3f":  
-            boxes = tight_boxes[:, :6]
-            angles = tight_boxes[:, 6].long() - 1
-            angles = torch.where(angles > 0, angles, torch.zeros_like(angles))
-            angles = torch.where(angles < 24, angles, torch.zeros_like(angles))
-            
-            boxes = boxes.to(args.device)
-            angles = angles.to(args.device)
-            
-            attributes = None
-            
-            mu, logvar = model.vae_box.encoder(objs, triples, boxes,
-                                                    angles_gt=angles, attributes=attributes)
-            mu = mu.detach().cpu()
-            mean_est = torch.mean(mu, dim=0, keepdim=True)
-            mu = mu - mean_est
-            cov_est = np.cov(mu.numpy().T)
-            
-            n, d = mu.size(0), mu.size(1)
-            cov_est_ = np.zeros((d, d))
-            for i in range(n):
-                x = mu[i].numpy()
-                cov_est_ += 1.0 / (n - 1.0) * np.outer(x, x)
-            
-            mean_est = mean_est[0]
-            
-            boxes_pred, angles_pred = model.sample_box(mean_est, cov_est_, objs, triples)
-            
-            boxes_denorm = batch_torch_denormalize_box_params(boxes)
-            boxes_pred_denorm = batch_torch_denormalize_box_params(boxes_pred)
-            
-            # loss calculation
-            total_loss = 0
-            recon_loss = F.l1_loss(boxes_pred, boxes)
-            angle_loss = F.nll_loss(angles_pred, angles)
+        test_losses['recon_loss'].append(recon_loss.item())
+        test_losses['angle_loss'].append(angle_loss.item())
+        
+        total_loss = recon_loss + angle_loss
+        
+        test_losses['total_loss'].append(total_loss.item())
+        
+        logger.info("<Scene id: {}>".format(scan))
+        logger.info("Reconstruction loss: {:.6f}".format(recon_loss.item()))
+        logger.info("Angle loss: {:.6f}".format(angle_loss.item()))
+        
+        if args.visualize:
+            angles_pred = torch.argmax(angles_pred, dim=1, keepdim=True) * 15.0 # 24 * 15 = 360
 
-            test_losses['recon_loss'].append(recon_loss.item())
-            test_losses['angle_loss'].append(angle_loss.item())
-            
-            total_loss = recon_loss + angle_loss
-            
-            test_losses['total_loss'].append(total_loss.item())
-            
-            logger.info("<Scene id: {}>".format(scan))
-            logger.info("Reconstruction loss: {:.6f}".format(recon_loss.item()))
-            logger.info("Angle loss: {:.6f}".format(angle_loss.item()))
-            
-            if args.visualize:
-                angles_pred = torch.argmax(angles_pred, dim=1, keepdim=True) * 15.0 # 24 * 15 = 360
-                
+            save_path = os.path.join(res_dir, scan + "_" + split)
+            classes = {}
+            for k, v in dataset.classes.items(): # {label: idx}
+                classes[v] = k # {idx: label}
+
+            objs_in_scene = [classes[objs[i].item()] for i in range(len(objs))]
+
+            # only visualize the scene which contains more than 5 plausible shapes
+            if len(objs_in_scene) >= 5:
                 # visualize the scene graph
                 vis_graph(use_sampled_graphs=False, scan_id=scan, split=str(split), data_dir=args.data_dir,
                         outfolder=res_dir)
                 
-                # visualize the scene for only trained objects
-                save_path = os.path.join(res_dir, scan + "_" + split)
-                classes = {}
-                for k, v in dataset.classes.items(): # {label: idx}
-                    classes[v] = k # {idx: label}
-                
-                objs_in_scene = [classes[objs[i].item()] for i in range(len(objs))]
-                
-                logger.info("Number of objects to visualize: {}".format(len(objs_in_scene)))
-                
                 with open(save_path + "_info.txt", "w") as write_file:
                     write_file.write("objects in the scene: \n{}".format(objs_in_scene))
                 
+                # visualize the scene for only trained objects     
                 points = np.zeros((len(objs_in_scene) - 1, 2048, 3))
                 points_pred = np.zeros((len(objs_in_scene) - 1, 2048, 3))
+
                 for i in range(len(objs_in_scene) - 1):
                     idx = random.randint(0, len(shapes[objs_in_scene[i]]) - 1)
                     points[i] = shapes[objs_in_scene[i]][idx]
@@ -188,7 +188,7 @@ def generate_scene(args, model, test_loader, res_dir, logger, shapes, num_points
                     box_and_angle_pred = torch.cat([boxes_pred_denorm[i].float(), angles_pred[i].float()])
                     box_points_pred[i] = params_to_8points(box_and_angle_pred, degrees=False)
                     points_pred[i] = fit_shapes_to_box(box_and_angle_pred, points_pred[i])
-                    
+                
                 visualizer = SceneVisualizer()
                 visualizer.save(path=(save_path + "_layoutGT"), type='all', shape_type="pc",
                                 boxes=box_points, points=points)
@@ -243,7 +243,7 @@ if __name__ == "__main__":
         
         # for scene composition
         args.exps_dir = '/root/hdd1/G2S/exps'
-        args.name = 'G2S_cherry_picking_4'
+        args.name = 'G2S_cherry_picking_8'
         args.gpu_ids = '0' # only 0 is available while debugging
         args.use_randomseed = True
         

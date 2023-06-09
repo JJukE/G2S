@@ -85,7 +85,8 @@ def train_one_epoch(args, model, train_loader, optimizer):
         train_losses['angle_loss'].append(angle_loss.item())
         train_losses['KL_Gauss_loss'].append(gauss_loss.item())
         
-        loss = recon_loss + angle_loss + args.kl_weight * gauss_loss
+        loss = args.box_weight * recon_loss + args.angle_weight * angle_loss + \
+            args.kl_weight * gauss_loss
         
         train_losses['total_loss'].append(loss.item())
         
@@ -204,25 +205,27 @@ if __name__ == '__main__':
 
     if args.debug:
         args.data_dir = '/root/hdd1/G2S/SceneGraphData'
-        args.name = 'G2S_SGVAE_practice_viz_230602_64_False'
+        args.name = 'G2S_SGVAE_230607_64_09_1_01'
         args.gpu_ids = '0' # only 0 is available while debugging
         args.exps_dir = '/root/hdd1/G2S/practice'
         args.verbose = True
         
-        args.num_epochs = 100
+        args.num_epochs = 200
         args.train_batch_size = 32
         args.num_treads = 8
         args.lr = 0.0001
         args.save_freq = 50
 
-        args.use_wandb = False
+        args.use_wandb = True
         args.wandb_entity = 'ray_park'
         args.wandb_project_name = 'G2S'
-        args.visualize = True
+        args.visualize = False
         args.vis_freq = 50
         
-        args.gconv_dim = 64 # TODO: 128 비교
-        args.residual = False # TODO: True 비교
+        args.gconv_dim = 64 # TODO: 32, 64, 128 비교
+        args.residual = True
+        args.box_weight = 0.9
+        args.angle_weight = 1
         args.kl_weight = 0.1
 
     # get logger and checkpoint manager
