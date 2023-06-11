@@ -145,43 +145,37 @@ def generate_scene(args, model, test_loader, res_dir, logger, shapes, num_points
 
             save_path = os.path.join(res_dir, scan + "_" + split)
             classes = {}
-            for k, v in dataset.classes.items(): # {label: idx}
+            for k, v in dataset.classes_to_vis.items(): # {label: idx}
                 classes[v] = k # {idx: label}
 
-            objs_in_scene = [classes[objs[i].item()] for i in range(len(objs))]
+            objs_in_scene = []
+            for global_id in objs.tolist():
+                if global_id in classes.keys():
+                    objs_in_scene.append(classes[global_id])
 
-            # only visualize the scene which contains more than 5 plausible shapes
-            if len(objs_in_scene) >= 5:
+            if len(objs_in_scene) >= 4:
+                logger.info("Number of objects to visualize: {}".format(len(objs_in_scene)))
+
                 # visualize the scene graph
                 vis_graph(use_sampled_graphs=False, scan_id=scan, split=str(split), data_dir=args.data_dir,
-                        outfolder=res_dir)
+                        outfolder=res_dir, train_or_test='test')
                 
                 with open(save_path + "_info.txt", "w") as write_file:
                     write_file.write("objects in the scene: \n{}".format(objs_in_scene))
                 
                 # visualize the scene for only trained objects     
-                points = np.zeros((len(objs_in_scene) - 1, 2048, 3))
-                points_pred = np.zeros((len(objs_in_scene) - 1, 2048, 3))
+                points = np.zeros((len(objs_in_scene), 2048, 3))
+                points_pred = np.zeros((len(objs_in_scene), 2048, 3))
 
-                for i in range(len(objs_in_scene) - 1):
+                for i in range(len(objs_in_scene)):
                     idx = random.randint(0, len(shapes[objs_in_scene[i]]) - 1)
                     points[i] = shapes[objs_in_scene[i]][idx]
                     points_pred[i] = shapes[objs_in_scene[i]][idx]
                 
                 angles = angles.unsqueeze(1) # (9) -> (9, 1)
-                box_points = np.zeros((len(objs_in_scene) - 1, 8, 3))
-                box_points_pred = np.zeros((len(objs_in_scene) - 1, 8, 3))
-                for i in range(len(objs_in_scene) - 1): # last element: scene (if args.use_scene_rels)
-                    # if type == "bounding_boxes" or type == "all": # bounding box
-                    #     if angles is None:
-                    #         box_points = self.params_to_8points_no_rot(boxes[i])
-                    #         if type == "all":
-                    #             points[i] = self.fit_shapes_to_box(boxes[i], points[i], withangle=False)
-                    #     else:
-                    #         box_and_angle = torch.cat([boxes[i].float(), angles[i].float()])
-                    #         box_points = self.params_to_8points(box_and_angle, degrees=False)
-                    #         if type == "all":
-                    #             points[i] = self.fit_shapes_to_box(box_and_angle, points[i])
+                box_points = np.zeros((len(objs_in_scene), 8, 3))
+                box_points_pred = np.zeros((len(objs_in_scene), 8, 3))
+                for i in range(len(objs_in_scene)):
                     box_and_angle = torch.cat([boxes_denorm[i].float(), angles[i].float()])
                     box_points[i] = params_to_8points(box_and_angle, degrees=False)
                     points[i] = fit_shapes_to_box(box_and_angle, points[i])
@@ -198,6 +192,9 @@ def generate_scene(args, model, test_loader, res_dir, logger, shapes, num_points
                 # # temporarily visualize on the window
                 # visualizer.visualize(type="all", shape_type="pc", boxes=box_points, points=points) # GT
                 # visualizer.visualize(type="all", shape_type="pc", boxes=box_points_pred, points=points_pred) # pred
+            else:
+                logger.info("There's no sufficient number of objects to visualize in {}. ".format(scan) +
+                            "Object labels overlapped with ShapeNet are lesser than 4.")
 
     for key in test_losses.keys():
         test_losses[key] = np.asarray(test_losses[key])
@@ -231,7 +228,7 @@ if __name__ == "__main__":
         
         # for layout generation
         args_sgvae.data_dir = '/root/hdd1/G2S/SceneGraphData'
-        args_sgvae.name = 'G2S_SGVAE_practice_230531_128_True'
+        args_sgvae.name = 'G2S_SGVAE_230609_all_graph_1e-5_32'
         args_sgvae.gpu_ids = '0' # only 0 is available while debugging
         args_sgvae.exps_dir = '/root/hdd1/G2S/practice'
         args_sgvae.ckpt_name = "ckpt_100.pt"
@@ -243,7 +240,7 @@ if __name__ == "__main__":
         
         # for scene composition
         args.exps_dir = '/root/hdd1/G2S/exps'
-        args.name = 'G2S_cherry_picking_8'
+        args.name = 'G2S_all_graph_1e-5_32'
         args.gpu_ids = '0' # only 0 is available while debugging
         args.use_randomseed = True
         

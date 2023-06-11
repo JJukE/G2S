@@ -63,7 +63,8 @@ class SceneGraphDataset(Dataset):
         if 'all' in categories:
             self.categories = cate_to_id.keys() # TODO: cate_to_id 정의 -> mapping 이후
         self.catfile = os.path.join(self.sgdata_dir, "classes.txt")
-        self.cates = {}
+        self.cat = {}
+        self.cates_to_vis = {}
         self.scans = []
         
         # define vocab
@@ -103,7 +104,6 @@ class SceneGraphDataset(Dataset):
         self.relationship_json, self.objs_json, self.tight_boxes_json = \
             self.read_relationship_json(self.rel_json_file, self.box_json_file)
         
-        # TODO: use_rio27 (또는 다른 방법으로) mapping, classes_rio27.json 직접 만들어야 할 듯
         if args.use_rio27:
             with open(os.path.join(self.sgdata_dir, "classes_rio27.json"), "r") as read_file:
                 self.vocab_rio27 = json.load(read_file)
@@ -116,12 +116,17 @@ class SceneGraphDataset(Dataset):
         with open(self.catfile, "r") as f:
             for line in f:
                 category = line.rstrip()
+                self.cat[category] = category # {'label': 'label'}
                 if category in self.categories:
-                    self.cates[category] = category
-        self.cates # {'label': 'label'}
-        self.classes = dict(zip(sorted(self.cates), range(len(self.cates)))) # {'label': id}
+                    self.cates_to_vis[category] = category # {'label': 'label'}
         
-        # TODO: shape 정상적인 layout만 학습하도록 handling 필요
+        self.classes = dict(zip(sorted(self.cat), range(len(self.cat)))) # {'label': global_id}
+
+        # when visualizing, we use the only objects overlapped with ShapeNet
+        self.classes_to_vis = {}
+        for k, v in self.classes.items():
+            if k in self.cates_to_vis.keys():
+                self.classes_to_vis.update({k: v})
 
     
     def read_relationship_json(self, json_file, box_json_file):
@@ -269,6 +274,7 @@ class SceneGraphDataset(Dataset):
             scene_instance_id = key
             scene_instance_class = instance2label[key]
             scene_class_id = -1
+
             if scene_instance_class in self.classes and \
                     (not self.args.use_rio27 or self.mapping_full2rio27[scene_instance_class] != '-'):
                 if self.args.use_rio27:
@@ -276,6 +282,7 @@ class SceneGraphDataset(Dataset):
                     scene_class_id = int(self.vocab_rio27['rio27_name_to_idx'][scene_instance_class])
                 else:
                     scene_class_id = self.classes[scene_instance_class]
+            
             if scene_class_id != -1 and key in selected_instances:
                 instance2mask[scene_instance_id] = counter + 1
                 counter += 1

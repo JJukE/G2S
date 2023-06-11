@@ -29,7 +29,7 @@ os.environ["OMP_NUM_THREADS"] = str(min(16, mp.cpu_count()))
 #============================================================
 
 @torch.no_grad()
-def evaluate(args, model, test_loader, res_dir, logger, dataset=None):
+def evaluate(args, model, test_loader, res_dir, logger, dataset):
     model.eval()
     test_losses = {'recon_loss': [], 'angle_loss': [], 'KL_Gauss_loss': [], 'total_loss': []}
     for i, data in enumerate(tqdm(test_loader, desc='Evaluate')):
@@ -88,7 +88,7 @@ def evaluate(args, model, test_loader, res_dir, logger, dataset=None):
         test_losses['recon_loss'].append(recon_loss.item())
         test_losses['angle_loss'].append(angle_loss.item())
         
-        total_loss = recon_loss + angle_loss
+        total_loss = args.box_weight * recon_loss + args.angle_weight * angle_loss
         
         test_losses['total_loss'].append(total_loss.item())
         
@@ -99,49 +99,46 @@ def evaluate(args, model, test_loader, res_dir, logger, dataset=None):
         if args.visualize:
             angles_pred = torch.argmax(angles_pred, dim=1, keepdim=True) * 15.0 # 24 * 15 = 360
             
-            # visualize the scene graph
-            vis_graph(use_sampled_graphs=False, scan_id=scan, split=str(split), data_dir=args.data_dir,
-                    outfolder=res_dir)
-            
             # visualize the scene for only trained objects
             save_path = os.path.join(res_dir, scan + "_" + split)
             classes = {}
-            for k, v in dataset.classes.items(): # {label: idx}
+            for k, v in dataset.classes_to_vis.items(): # {label: idx}
                 classes[v] = k # {idx: label}
             
-            objs_in_scene = [classes[objs[i].item()] for i in range(len(objs))]
+            objs_in_scene = []
+            for global_id in objs.tolist():
+                if global_id in classes.keys():
+                    objs_in_scene.append(classes[global_id])
             
-            logger.info("Number of objects to visualize: {}".format(len(objs_in_scene)))
+            if len(objs_in_scene) >= 4:
+                logger.info("Number of objects to visualize: {}".format(len(objs_in_scene)))
             
-            with open(save_path + "_info.txt", "w") as write_file:
-                write_file.write("objects in the scene: \n{}".format(objs_in_scene))
-            
-            angles = angles.unsqueeze(1) # (9) -> (9, 1)
-            box_points = np.zeros((len(objs_in_scene), 8, 3))
-            box_points_pred = np.zeros((len(objs_in_scene), 8, 3))
-            for i in range(len(objs_in_scene) - 1): # last element: scene (if args.use_scene_rels)
-                # if type == "bounding_boxes" or type == "all": # bounding box
-                #     if angles is None:
-                #         box_points = self.params_to_8points_no_rot(boxes[i])
-                #         if type == "all":
-                #             points[i] = self.fit_shapes_to_box(boxes[i], points[i], withangle=False)
-                #     else:
-                #         box_and_angle = torch.cat([boxes[i].float(), angles[i].float()])
-                #         box_points = self.params_to_8points(box_and_angle, degrees=False)
-                #         if type == "all":
-                #             points[i] = self.fit_shapes_to_box(box_and_angle, points[i])
-                box_and_angle = torch.cat([boxes_denorm[i].float(), angles[i].float()])
-                box_points[i] = params_to_8points(box_and_angle, degrees=False)
-                box_and_angle_pred = torch.cat([boxes_pred_denorm[i].float(), angles_pred[i].float()])
-                box_points_pred[i] = params_to_8points(box_and_angle_pred, degrees=False)
+                # visualize the scene graph
+                vis_graph(use_sampled_graphs=False, scan_id=scan, split=str(split), data_dir=args.data_dir,
+                        outfolder=res_dir, train_or_test='test')
                 
-            visualizer = SceneVisualizer()
-            visualizer.save(path=(save_path + "_layoutGT"), type='bb', boxes=box_points)
-            visualizer.save(path=(save_path + "_layout"), type='bb', boxes=box_points_pred)
+                with open(save_path + "_info.txt", "w") as write_file:
+                    write_file.write("objects in the scene: \n{}".format(objs_in_scene))
             
-            # temporarily visualize on the window
-            # visualizer.visualize(type='bb', boxes=box_points) # GT
-            # visualizer.visualize(type='bb', boxes=box_points_pred) # pred
+                angles = angles.unsqueeze(1) # (9) -> (9, 1)
+                box_points = np.zeros((len(objs_in_scene), 8, 3))
+                box_points_pred = np.zeros((len(objs_in_scene), 8, 3))
+                for i in range(len(objs_in_scene)):
+                    box_and_angle = torch.cat([boxes_denorm[i].float(), angles[i].float()])
+                    box_points[i] = params_to_8points(box_and_angle, degrees=False)
+                    box_and_angle_pred = torch.cat([boxes_pred_denorm[i].float(), angles_pred[i].float()])
+                    box_points_pred[i] = params_to_8points(box_and_angle_pred, degrees=False)
+                
+                visualizer = SceneVisualizer()
+                visualizer.save(path=save_path + "_layoutGT", type='bb', boxes=box_points)
+                visualizer.save(path=save_path + "_layout", type='bb', boxes=box_points_pred)
+                
+                # temporarily visualize on the window
+                # visualizer.visualize(type='bb', boxes=box_points) # GT
+                # visualizer.visualize(type='bb', boxes=box_points_pred) # pred
+            else:
+                logger.info("There's no sufficient number of objects to visualize in {}. ".format(scan) +
+                            "Object labels overlapped with ShapeNet are lesser than 4.")
 
     for key in test_losses.keys():
         test_losses[key] = np.asarray(test_losses[key])
@@ -159,14 +156,14 @@ if __name__ == '__main__':
 
     if args.debug:
         args.data_dir = '/root/hdd1/G2S/SceneGraphData'
-        args.name = 'G2S_SGVAE_practice_230531_64_True'
+        args.name = 'G2S_SGVAE_230609_all_graph_1e-5_16'
         args.gpu_ids = '0' # only 0 is available while debugging
         args.exps_dir = '/root/hdd1/G2S/practice'
-        args.ckpt_name = "ckpt_100.pt"
+        args.ckpt_name = "ckpt_250.pt"
         args.verbose = True
         
         args.test_batch_size = 1
-        args.visualize = False
+        args.visualize = True
 
     # get logger
     exp_dir = os.path.join(args.exps_dir, args.name, "ckpts")

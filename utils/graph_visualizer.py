@@ -1,5 +1,7 @@
 import os
 import json
+
+import numpy as np
 from graphviz import Digraph
 from utils import viz_util
 
@@ -19,7 +21,7 @@ def visualize_scene_graph(graph, relationships, rel_filter_in = [], rel_filter_o
 	else:
 		edge_mask = None
 	draw_edges(g, graph["relationships"], relationships, rel_filter_in, rel_filter_out, obj_ids, edge_mask)
-	g.render(outfolder + "/" + scan_id + "_graph")
+	g.render(os.path.join(outfolder + "/" + scan_id + "_graph"))
 
 
 def draw_edges(g, graph_relationships, relationships, rel_filter_in, rel_filter_out, obj_ids, edge_mask=None):
@@ -49,18 +51,16 @@ def draw_edges(g, graph_relationships, relationships, rel_filter_in, rel_filter_
 
 
 def vis_graph(use_sampled_graphs=True, scan_id="4d3d82b6-8cf4-2e04-830a-4303fa0e79c7", split=None, with_manipulation=False,
-				data_dir='./SceneGraphData', outfolder="./vis_graphs/", graphfile='graphs_layout.yml'):
+				data_dir='./SceneGraphData', outfolder="./vis_graphs/", graphfile='graphs_layout.yml', train_or_test='test'):
     
 	data_path = os.path.join(data_dir, "Graphs")
 	if use_sampled_graphs:
 		# use this option to customize your own graphs in the yaml format
-		palette_json = os.path.join(data_path, "color_palette.json")
-		with open(palette_json, "r") as read_file:
-			color_palette = json.load(read_file)['hex']
+		color_palette = get_colors()
 		graph_yaml = os.path.join(data_path, graphfile)
 	else:
 		# use this option to read scene graphs from the dataset
-		relationships_json = os.path.join(data_path, 'relationships_test_clean.json') # exp : 'relationships_train_clean.json')
+		relationships_json = os.path.join(data_path, 'relationships_{}_clean.json'.format(train_or_test)) # exp : 'relationships_train_clean.json')
 		objects_json = os.path.join(data_path, "objects.json")
 
 	relationships = viz_util.read_relationships(os.path.join(data_path, "relationships.txt"))
@@ -82,7 +82,8 @@ def vis_graph(use_sampled_graphs=True, scan_id="4d3d82b6-8cf4-2e04-830a-4303fa0e
 	filter_dict_out = [] # ["left", "right", "behind", "front", "same as", "same symmetry as", "bigger than", "lower than", "higher than", "close by"]
 	for scan_id in [scan_id]:
 		visualize_scene_graph(graph[scan_id], relationships, filter_dict_in, filter_dict_out, [], "v1", scan_id=scan_id,
-													outfolder=outfolder)
+												outfolder=outfolder)
+
 		if with_manipulation and use_sampled_graphs:
 			# manipulation only supported for custom graphs
 			visualize_scene_graph(graph_mani[scan_id], relationships, filter_dict_in, filter_dict_out, [], "v1", scan_id=scan_id + "_mani",
@@ -93,3 +94,31 @@ def vis_graph(use_sampled_graphs=True, scan_id="4d3d82b6-8cf4-2e04-830a-4303fa0e
 	# return used colors so that they can be used for 3D model visualization
 	return dict(zip(idx, color))
 
+# utility function for coloring
+def get_colors():
+	"""get the colors for visualization
+	
+	"#8e7cc3ff": Light purple, fully opaque
+	"#ea9999ff": Light red or salmon, fully opaque
+	"#93c47dff": Medium greenish-blue, fully opaque
+	"#9fc5e8ff": Light sky blue, fully opaque
+	"#d55e00": Bright orange
+	"#cc79a7": Soft magenta
+	"#c4458b": Deep pink
+	"#0072b2": Strong blue
+	"#f0e442": Light yellow
+	"#009e73": Medium green or teal
+
+	Returns:
+		colors (num_colors, 3): The rgb values devidened by 255 (range: 0 ~ 1)
+	"""
+	color_palette = {"hex": ["#8e7cc3ff", "#ea9999ff", "#93c47dff",
+					"#9fc5e8ff", "#d55e00", "#cc79a7",
+					"#c4458b", "#0072b2", "#f0e442",
+					"#009e73"],
+					"rgb": [[142, 124, 195], [234, 153, 153], [147, 196, 125],
+							[159, 197, 232], [213, 94, 0], [204, 121, 167],
+							[196, 69, 139], [0, 114, 178], [240, 228, 66],
+							[0, 158, 115]]}
+	colors = np.asarray(color_palette["rgb"]) / 255.
+	return colors

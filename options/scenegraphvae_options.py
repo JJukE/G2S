@@ -58,5 +58,9 @@ class SGVAETestOptions(TestOptions):
         parser.add_argument('--label_fname', type=str, default='labels.instances.align.annotated.ply')
         parser.add_argument('--shuffle_objs', type=str2bool, default=True, help='shuffle objs of a scene')
         parser.add_argument('--use_rio27', type=str2bool, default=False)
+
+        # Loss
+        parser.add_argument('--box_weight', type=float, default=0.4, help='weight of Box reconstruction loss term')
+        parser.add_argument('--angle_weight', type=float, default=0.5, help='weight of Angle reconstruction loss term')
         
         return parser

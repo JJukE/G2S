@@ -18,10 +18,12 @@ from tqdm import tqdm
 from data.sg_dataset import SceneGraphDataset, collate_fn_sgvae
 from models.scenegraphvae import LayoutVAE
 from utils.util import seed_all, CheckpointManager, print_model
+from utils.viz_util import params_to_8points, batch_torch_denormalize_box_params
 from options.scenegraphvae_options import SGVAETrainOptions
 from jjuke.logger import CustomLogger
 
 from utils.visualizer import SceneVisualizer
+from utils.graph_visualizer import vis_graph
 
 os.environ["OMP_NUM_THREADS"] = str(min(16, mp.cpu_count()))
 
@@ -119,7 +121,7 @@ def train_one_epoch(args, model, train_loader, optimizer):
         
 
 @torch.no_grad()
-def val_one_epoch(args, model, val_loader, res_dir, epoch):
+def val_one_epoch(args, model, val_loader, res_dir, epoch, logger, dataset):
     model.eval()
     val_losses = {'recon_loss': [], 'angle_loss': [], 'KL_Gauss_loss': [], 'total_loss': []}
     for i, data in enumerate(tqdm(val_loader, desc='Validate')):
@@ -132,6 +134,10 @@ def val_one_epoch(args, model, val_loader, res_dir, epoch):
             triples = data['triples'].to(args.device)
             tight_boxes = data['boxes'].to(args.device)
 
+            instances = data['instance_id']
+            scan = data['scan_id']
+            split = data['split_id']
+
         except Exception as e:
             print('Exception', str(e))
             continue
@@ -142,30 +148,41 @@ def val_one_epoch(args, model, val_loader, res_dir, epoch):
         angles = tight_boxes[:, 6].long() - 1 
         angles = torch.where(angles > 0, angles, torch.zeros_like(angles))
         angles = torch.where(angles < 24, angles, torch.zeros_like(angles))
+
+        boxes = boxes.to(args.device)
+        angles = angles.to(args.device)
         
         attributes = None
         
-        mu, logvar, boxes_pred, angles_pred = model(objs, triples, boxes,
-                                                    angles=angles, attributes=attributes)
+        mu, logvar = model.vae_box.encoder(objs, triples, boxes,
+                                                  angles_gt=angles, attributes=attributes)
+        mu = mu.detach().cpu()
+        mean_est = torch.mean(mu, dim=0, keepdim=True)
+        mu = mu - mean_est
+        cov_est = np.cov(mu.numpy().T)
+        
+        n, d = mu.size(0), mu.size(1)
+        cov_est_ = np.zeros((d, d))
+        for i in range(n):
+            x = mu[i].numpy()
+            cov_est_ += 1.0 / (n - 1.0) * np.outer(x, x)
+        
+        mean_est = mean_est[0]
+        
+        boxes_pred, angles_pred = model.sample_box(mean_est, cov_est_, objs, triples) # cov_est? cov_est_?
+        
+        boxes_denorm = batch_torch_denormalize_box_params(boxes)
+        boxes_pred_denorm = batch_torch_denormalize_box_params(boxes_pred)
         
         # loss calculation
         total_loss = 0
         recon_loss = F.l1_loss(boxes_pred, boxes)
         angle_loss = F.nll_loss(angles_pred, angles)
-        try:
-            gauss_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp()) / mu.size(0)
-
-        except:
-            logger.warn("blowup!!!")
-            logger.warn("logvar", torch.sum(logvar.data), torch.sum(torch.abs(logvar.data)), torch.max(logvar.data),
-                torch.min(logvar.data))
-            logger.warn("mu", torch.sum(mu.data), torch.sum(torch.abs(mu.data)), torch.max(mu.data), torch.min(mu.data))
 
         val_losses['recon_loss'].append(recon_loss.item())
         val_losses['angle_loss'].append(angle_loss.item())
-        val_losses['KL_Gauss_loss'].append(gauss_loss.item())
         
-        total_loss = recon_loss + angle_loss + args.kl_weight * gauss_loss
+        total_loss = args.box_weight * recon_loss + args.angle_weight * angle_loss
         
         val_losses['total_loss'].append(total_loss.item())
 
@@ -176,22 +193,50 @@ def val_one_epoch(args, model, val_loader, res_dir, epoch):
     if args.use_wandb:
         wandb.log({"[Val] recon_loss": val_losses['recon_loss'],
                    "[Val] angle_loss": val_losses['angle_loss'],
-                   "[Val] KL_Gauss_loss": val_losses['KL_Gauss_loss'],
                    "[Val] total_loss": val_losses['total_loss']})
     
     if args.visualize and epoch % args.vis_freq == 0:
         angles_pred = torch.argmax(angles_pred, dim=1, keepdim=True) * 15.0 # 24 * 15 = 360
-        # TODO: visualizer에는 angle 적용된 box points 들어가도록 수정 (범용적인 모듈로!)
-        print("number of boxes: {}".format(len(boxes)))
-        print("number of angles: {}".format(len(angles)))
-        visualizer = SceneVisualizer()
-        # visualizer.save(path=res_dir, type='bb', boxes=boxes_pred, angles=angles_pred)
+
+        save_path = os.path.join(res_dir, scan + "_" + split)
+        classes = {}
+        for k, v in dataset.classes_to_vis.items(): # {label: idx}
+            classes[v] = k # {idx: label}
         
-        # temporarily visualize on the window
-        print("shape of boxes: {}, angles: {}".format(boxes.shape, angles.shape))
-        print("shape of boxes_pred: {}, angles_pred: {}".format(boxes_pred.shape, angles_pred.shape))
-        visualizer.visualize(type='bb', boxes=boxes, angles=angles) # GT
-        visualizer.visualize(type='bb', boxes=boxes_pred, angles=angles_pred) # pred
+        objs_in_scene = []
+        for global_id in objs.tolist():
+            if global_id in classes.keys():
+                objs_in_scene.append(classes[global_id])
+
+        # only visualize the scene which contains more than 4 overlapped object labels with ShapeNet
+        if len(objs_in_scene) >= 4:
+            logger.info("Number of objects to visualize: {} in scan '{}'".format(len(objs_in_scene), scan))
+            # visualize the scene graph
+            vis_graph(use_sampled_graphs=False, scan_id=scan, split=str(split), data_dir=args.data_dir,
+                    outfolder=res_dir, train_or_test='train')
+
+            with open(save_path + "_info.txt", "w") as write_file:
+                write_file.write("objects in the scene: \n{}".format(objs_in_scene))
+            
+            angles = angles.unsqueeze(1) # (9) -> (9, 1)
+            box_points = np.zeros((len(objs_in_scene), 8, 3))
+            box_points_pred = np.zeros((len(objs_in_scene), 8, 3))
+            for i in range(len(objs_in_scene)):
+                box_and_angle = torch.cat([boxes_denorm[i].float(), angles[i].float()])
+                box_points[i] = params_to_8points(box_and_angle, degrees=False)
+                box_and_angle_pred = torch.cat([boxes_pred_denorm[i].float(), angles_pred[i].float()])
+                box_points_pred[i] = params_to_8points(box_and_angle_pred, degrees=False)
+                
+            visualizer = SceneVisualizer()
+            visualizer.save(path=save_path + "_layoutGT", type='bb', boxes=box_points)
+            visualizer.save(path=save_path + "_layout", type='bb', boxes=box_points_pred)
+            
+            # temporarily visualize on the window
+            # visualizer.visualize(type='bb', boxes=box_points) # GT
+            # visualizer.visualize(type='bb', boxes=box_points_pred) # pred
+        else:
+            logger.info("There's no sufficient number of objects to visualize in {}. ".format(scan) +
+                        "Object labels overlapped with ShapeNet are lesser than 4.")
     
     return val_losses
 
@@ -205,26 +250,26 @@ if __name__ == '__main__':
 
     if args.debug:
         args.data_dir = '/root/hdd1/G2S/SceneGraphData'
-        args.name = 'G2S_SGVAE_230607_64_09_1_01'
+        args.name = 'G2S_SGVAE_230609_all_graph_64_1_1_01'
         args.gpu_ids = '0' # only 0 is available while debugging
         args.exps_dir = '/root/hdd1/G2S/practice'
         args.verbose = True
         
         args.num_epochs = 200
-        args.train_batch_size = 32
+        args.train_batch_size = 128
         args.num_treads = 8
-        args.lr = 0.0001
+        args.lr = 1e-5
         args.save_freq = 50
 
-        args.use_wandb = True
+        args.use_wandb = False
         args.wandb_entity = 'ray_park'
         args.wandb_project_name = 'G2S'
-        args.visualize = False
+        args.visualize = True
         args.vis_freq = 50
         
         args.gconv_dim = 64 # TODO: 32, 64, 128 비교
         args.residual = True
-        args.box_weight = 0.9
+        args.box_weight = 1
         args.angle_weight = 1
         args.kl_weight = 0.1
 
@@ -311,7 +356,8 @@ if __name__ == '__main__':
             logger.info('[Train] Epoch {}/{} | Loss {:.6f} | Time {:.4f} sec'.format(epoch,
                 args.num_epochs, train_loss['total_loss'], time.time() - epoch_start_time))
             
-            val_loss = val_one_epoch(args, model, val_loader, res_dir=vis_dir, epoch=epoch)
+            val_loss = val_one_epoch(args, model, val_loader, res_dir=vis_dir,
+                                     epoch=epoch, logger=logger, dataset=dataset)
             logger.info('[Val] Loss {:.6f}'.format(val_loss['total_loss']))
             
             if epoch % args.save_freq == 0:

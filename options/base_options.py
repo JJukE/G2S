@@ -130,7 +130,7 @@ class TrainOptions(BaseOptions):
         parser.add_argument('--phase', type=str, default='train', help='train, val, test, etc')
         parser.add_argument('--visualize', type=str2bool, default=False, help='whether visualize in validation')
         parser.add_argument('--num_epochs', type=int, default=100, help='number of epochs with the initial learning rate')
-        parser.add_argument('--lr', type=float, default=1e-3)
+        parser.add_argument('--lr', type=float, default=1e-4)
         parser.add_argument('--max_iters', type=int, default=500000, help='maximum iterations of training (if trained by iterations, not epochs)')
         parser.add_argument('--train_batch_size', type=int, default=128)
         parser.add_argument('--val_batch_size', type=int, default=32)
